@@ -1,12 +1,41 @@
 @import "tailwindcss";
 
+@theme {
+  --color-app-bg: #1f1d1c;
+  --color-app-sidebar: #1a1817;
+  --color-app-surface: #2a2724;
+  --color-app-surface-hover: #322f2c;
+  --color-app-border: #2e2b28;
+  --color-app-border-strong: #3a3633;
+  --color-app-text: #ece9e2;
+  --color-app-text-muted: #908a80;
+  --color-app-text-faint: #6a655d;
+  --color-app-accent: #d97757;
+  --color-app-accent-soft: #c46a4a;
+  --font-serif: "Tiempos Headline", "Source Serif Pro", "Iowan Old Style", "Apple Garamond", "Baskerville", Georgia, serif;
+}
+
 :root {
-  color-scheme: light dark;
+  color-scheme: dark;
 }
 
 html, body, #root {
   height: 100%;
   margin: 0;
+  background: var(--color-app-bg);
+  color: var(--color-app-text);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-app-border-strong);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
