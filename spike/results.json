@@ -1,0 +1,16 @@
+{
+  "base_model": "mlx-community/gemma-3-4b-it-4bit",
+  "synthetic_adapters": true,
+  "base_load_ms": 1264.8006670060568,
+  "lora_wrap_ms": 2.5980409991461784,
+  "cold_adapter_load_ms": 3.2210409990511835,
+  "warm_swap_ms": 2.5817499990807846,
+  "warm_swap_back_ms": 2.532291997340508,
+  "avg_warm_swap_ms": 2.557020998210646,
+  "peak_rss_gb": 3.2122650146484375,
+  "output_a": " criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio criterio",
+  "output_b": " homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming homecoming",
+  "pass_swap_latency": true,
+  "pass_peak_rss": true,
+  "pass_outputs_differ": null
+}

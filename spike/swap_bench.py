@@ -5,6 +5,9 @@ Pass criteria:
   - peak RSS < 6 GB
   - outputs differ between adapters (when --adapter-a/--adapter-b are supplied)
 
+Production hot-swap path: call linear_to_lora_layers once, then swap with
+model.load_weights(strict=False). That is what is timed here.
+
 Usage:
   python swap_bench.py
   python swap_bench.py --adapter-a /path/to/a --adapter-b /path/to/b
@@ -13,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import platform
 import shutil
@@ -25,9 +29,13 @@ import psutil
 
 DEFAULT_BASE = "mlx-community/gemma-3-4b-it-4bit"
 PROMPT = "Write a one-sentence description of a sunset over the ocean."
-GEN_TOKENS = 64
+GEN_TOKENS = 32
 WARM_SWAP_TARGET_MS = 500
 PEAK_RSS_TARGET_GB = 6.0
+
+LORA_RANK = 8
+LORA_SCALE = 20.0
+LORA_NUM_LAYERS = 8
 
 
 def require_apple_silicon() -> None:
@@ -43,47 +51,56 @@ def fmt_ms(seconds: float) -> str:
     return f"{seconds * 1000:.1f} ms"
 
 
-def make_synthetic_adapter(model, out_dir: Path, seed: int) -> Path:
-    """Create a tiny random LoRA adapter for latency-only benchmarking.
+def lora_config_dict() -> dict:
+    return {
+        "rank": LORA_RANK,
+        "scale": LORA_SCALE,
+        "dropout": 0.0,
+    }
 
-    Behavior won't meaningfully change vs. base; this exists purely to exercise
-    the load/swap code path with realistic tensor shapes.
-    """
+
+def adapter_config_dict() -> dict:
+    return {
+        "fine_tune_type": "lora",
+        "num_layers": LORA_NUM_LAYERS,
+        "lora_parameters": lora_config_dict(),
+    }
+
+
+def prepare_synthetic_adapters(base_path: str, out_a: Path, out_b: Path) -> None:
+    """Build two valid mlx-lm LoRA adapter directories with random weights."""
     import mlx.core as mx
-    import mlx.nn as nn
+    from mlx.utils import tree_flatten
+    from mlx_lm import load
+    from mlx_lm.tuner.utils import linear_to_lora_layers
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    rank = 8
-    alpha = 16
+    print("  loading base to derive adapter shapes...", flush=True)
+    model, _ = load(base_path)
+    linear_to_lora_layers(model, LORA_NUM_LAYERS, lora_config_dict())
 
-    weights: dict[str, mx.array] = {}
-    mx.random.seed(seed)
-    for name, module in model.named_modules():
-        if isinstance(module, nn.Linear) and "attn" in name:
-            in_f, out_f = module.weight.shape[1], module.weight.shape[0]
-            weights[f"{name}.lora_a"] = mx.random.normal((in_f, rank)) * 0.01
-            weights[f"{name}.lora_b"] = mx.zeros((rank, out_f))
+    trainable_template = dict(tree_flatten(model.trainable_parameters()))
+    if not trainable_template:
+        raise RuntimeError("linear_to_lora_layers produced no trainable params.")
 
-    if not weights:
-        raise RuntimeError("No attention Linear layers found to attach LoRA to.")
+    cfg = adapter_config_dict()
+    for out_dir, seed in [(out_a, 1), (out_b, 2)]:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        mx.random.seed(seed)
+        weights = {
+            name: (mx.random.normal(w.shape) * 0.02).astype(w.dtype)
+            for name, w in trainable_template.items()
+        }
+        mx.eval(weights)
+        mx.save_safetensors(str(out_dir / "adapters.safetensors"), weights)
+        (out_dir / "adapter_config.json").write_text(json.dumps(cfg, indent=2))
+        print(f"  wrote synthetic adapter at {out_dir} ({len(weights)} tensors)")
 
-    mx.save_safetensors(str(out_dir / "adapters.safetensors"), weights)
-    (out_dir / "adapter_config.json").write_text(
-        json.dumps(
-            {
-                "fine_tune_type": "lora",
-                "lora_parameters": {
-                    "rank": rank,
-                    "alpha": alpha,
-                    "dropout": 0.0,
-                    "scale": alpha / rank,
-                    "keys": ["self_attn.q_proj", "self_attn.v_proj"],
-                },
-            },
-            indent=2,
-        )
-    )
-    return out_dir
+    del model
+    gc.collect()
+
+
+def read_adapter_config(adapter_dir: Path) -> dict:
+    return json.loads((adapter_dir / "adapter_config.json").read_text())
 
 
 def time_block(label: str, fn):
@@ -95,10 +112,19 @@ def time_block(label: str, fn):
     return result, elapsed
 
 
+def swap_weights(model, adapter_dir: Path) -> None:
+    import mlx.core as mx
+
+    model.load_weights(str(adapter_dir / "adapters.safetensors"), strict=False)
+    mx.eval(model.parameters())
+
+
 def generate_text(model, tokenizer, prompt: str) -> str:
     from mlx_lm import generate as mlx_generate
 
-    return mlx_generate(model, tokenizer, prompt=prompt, max_tokens=GEN_TOKENS, verbose=False)
+    return mlx_generate(
+        model, tokenizer, prompt=prompt, max_tokens=GEN_TOKENS, verbose=False
+    )
 
 
 def main() -> int:
@@ -114,29 +140,41 @@ def main() -> int:
     print(f"Spike: MLX hot-swap latency on {args.base}")
     print(f"  starting RSS: {rss_gb():.2f} GB")
 
-    from mlx_lm import load
-    from mlx_lm.tuner.utils import load_adapters
-
-    print("\n[1/4] Loading base model")
-    (model, tokenizer), base_load_s = time_block("base load", lambda: load(args.base))
-    rss_after_base = rss_gb()
-    print(f"  RSS after base: {rss_after_base:.2f} GB")
-
     tmp_root: Path | None = None
     if args.adapter_a and args.adapter_b:
         adapter_a, adapter_b = args.adapter_a, args.adapter_b
         synthetic = False
+        cfg_a = read_adapter_config(adapter_a)
+        if read_adapter_config(adapter_b)["lora_parameters"] != cfg_a["lora_parameters"]:
+            sys.exit("Adapter A and B have different lora_parameters; not supported.")
+        wrap_layers = cfg_a["num_layers"]
+        wrap_lora = cfg_a["lora_parameters"]
     else:
-        print("\n  no adapters supplied; generating synthetic adapters for latency-only run")
+        print("\n[setup] Generating synthetic adapters (latency-only run)")
         tmp_root = Path(tempfile.mkdtemp(prefix="lorahub_spike_"))
-        adapter_a = make_synthetic_adapter(model, tmp_root / "a", seed=1)
-        adapter_b = make_synthetic_adapter(model, tmp_root / "b", seed=2)
+        prepare_synthetic_adapters(args.base, tmp_root / "a", tmp_root / "b")
+        adapter_a, adapter_b = tmp_root / "a", tmp_root / "b"
         synthetic = True
+        wrap_layers = LORA_NUM_LAYERS
+        wrap_lora = lora_config_dict()
 
-    print("\n[2/4] Cold-loading adapter A")
-    _, cold_load_a_s = time_block(
-        "load A", lambda: load_adapters(model, str(adapter_a))
+    from mlx_lm import load
+    from mlx_lm.tuner.utils import linear_to_lora_layers
+
+    print("\n[1/5] Loading base model (fresh)")
+    (model, tokenizer), base_load_s = time_block(
+        "base load", lambda: load(args.base)
     )
+    rss_after_base = rss_gb()
+    print(f"  RSS after base: {rss_after_base:.2f} GB")
+
+    print("\n[2/5] Wrapping LoRA layers (one-time)")
+    _, wrap_s = time_block(
+        "wrap", lambda: linear_to_lora_layers(model, wrap_layers, wrap_lora)
+    )
+
+    print("\n[3/5] Cold-loading adapter A")
+    _, cold_load_a_s = time_block("load A", lambda: swap_weights(model, adapter_a))
     rss_after_a = rss_gb()
     print(f"  RSS after A: {rss_after_a:.2f} GB")
 
@@ -145,10 +183,8 @@ def main() -> int:
     out_a = generate_text(model, tokenizer, PROMPT)
     print(fmt_ms(time.perf_counter() - t0))
 
-    print("\n[3/4] Warm-swapping to adapter B")
-    _, warm_swap_s = time_block(
-        "swap B", lambda: load_adapters(model, str(adapter_b))
-    )
+    print("\n[4/5] Warm swap (A → B)")
+    _, warm_swap_s = time_block("swap B", lambda: swap_weights(model, adapter_b))
     rss_after_b = rss_gb()
     print(f"  RSS after B: {rss_after_b:.2f} GB")
 
@@ -157,10 +193,8 @@ def main() -> int:
     out_b = generate_text(model, tokenizer, PROMPT)
     print(fmt_ms(time.perf_counter() - t0))
 
-    print("\n[4/4] Second warm swap (back to A)")
-    _, warm_swap_back_s = time_block(
-        "swap A", lambda: load_adapters(model, str(adapter_a))
-    )
+    print("\n[5/5] Warm swap back (B → A)")
+    _, warm_swap_back_s = time_block("swap A", lambda: swap_weights(model, adapter_a))
 
     peak_rss = max(rss_after_base, rss_after_a, rss_after_b)
     warm_swap_ms = warm_swap_s * 1000
@@ -175,6 +209,7 @@ def main() -> int:
     print("Results")
     print("=" * 60)
     print(f"  base load:           {base_load_s * 1000:>8.1f} ms")
+    print(f"  one-time LoRA wrap:  {wrap_s * 1000:>8.1f} ms")
     print(f"  cold adapter load:   {cold_load_a_s * 1000:>8.1f} ms")
     print(f"  warm swap (A→B):     {warm_swap_ms:>8.1f} ms")
     print(f"  warm swap (B→A):     {warm_swap_back_ms:>8.1f} ms")
@@ -183,7 +218,8 @@ def main() -> int:
     if pass_diff is not None:
         print(f"  outputs differ:      {pass_diff}")
 
-    print("\n  PASS" if (pass_swap and pass_rss and pass_diff is not False) else "\n  FAIL")
+    overall_pass = pass_swap and pass_rss and pass_diff is not False
+    print("\n  PASS" if overall_pass else "\n  FAIL")
     print(f"    swap latency: {'OK' if pass_swap else 'FAIL'}")
     print(f"    peak RSS:     {'OK' if pass_rss else 'FAIL'}")
     if pass_diff is not None:
@@ -197,6 +233,7 @@ def main() -> int:
                 "base_model": args.base,
                 "synthetic_adapters": synthetic,
                 "base_load_ms": base_load_s * 1000,
+                "lora_wrap_ms": wrap_s * 1000,
                 "cold_adapter_load_ms": cold_load_a_s * 1000,
                 "warm_swap_ms": warm_swap_ms,
                 "warm_swap_back_ms": warm_swap_back_ms,
@@ -216,7 +253,7 @@ def main() -> int:
     if tmp_root is not None:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
-    return 0 if (pass_swap and pass_rss and pass_diff is not False) else 1
+    return 0 if overall_pass else 1
 
 
 if __name__ == "__main__":
