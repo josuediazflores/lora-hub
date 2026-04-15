@@ -1,10 +1,11 @@
--- Seed data for local dev. The base_sha below is a placeholder; replace with the
--- real sha returned by the sidecar's base_fingerprint op before enabling compat
--- filtering in a real client.
+-- Seed data for local dev.
+-- base_sha below is the real fingerprint for mlx-community/gemma-3-4b-it-4bit
+-- computed by the sidecar's fingerprint_base helper. Update if the upstream
+-- repo re-quantizes.
 
 INSERT INTO bases (base_id, name, family, parameters, quant, base_sha, hf_repo, size_bytes, license, description) VALUES
   ('gemma-3-4b-it-4bit', 'Gemma 3 4B Instruct (4-bit)', 'gemma', '4B', '4bit',
-   'PLACEHOLDER_GEMMA_3_4B_SHA',
+   '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'mlx-community/gemma-3-4b-it-4bit',
    2500000000,
    'Gemma Terms of Use',
@@ -13,7 +14,7 @@ INSERT INTO bases (base_id, name, family, parameters, quant, base_sha, hf_repo, 
 INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme_md, license, tags, published_at, downloads, rating_avg, rating_count) VALUES
   ('sql-generator', 'SQL Generator',
    'lorahub',
-   'gemma-3-4b-it-4bit', 'PLACEHOLDER_GEMMA_3_4B_SHA',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'Turn natural-language questions into SQL queries.',
    '# SQL Generator\n\nFine-tuned on the Spider + BIRD datasets. Works well for PostgreSQL and SQLite flavors.\n\n## Example\n```\nQ: How many users signed up last week?\nA: SELECT COUNT(*) FROM users WHERE created_at >= date(''now'', ''-7 days'');\n```',
    'Apache-2.0',
@@ -22,7 +23,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
 
   ('email-rewriter', 'Email Rewriter',
    'lorahub',
-   'gemma-3-4b-it-4bit', 'PLACEHOLDER_GEMMA_3_4B_SHA',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'Rewrites drafts in formal, casual, or concise tones.',
    '# Email Rewriter\n\nTakes a raw email draft and a target tone; returns a rewritten version.',
    'Apache-2.0',
@@ -31,7 +32,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
 
   ('code-reviewer', 'Code Reviewer',
    'lorahub',
-   'gemma-3-4b-it-4bit', 'PLACEHOLDER_GEMMA_3_4B_SHA',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'Reviews diffs and surfaces likely bugs, smells, and perf issues.',
    '# Code Reviewer\n\nFeed a unified diff and optional file context. Returns a structured review.',
    'Apache-2.0',
@@ -40,7 +41,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
 
   ('json-extractor', 'JSON Extractor',
    'lorahub',
-   'gemma-3-4b-it-4bit', 'PLACEHOLDER_GEMMA_3_4B_SHA',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'Reliably extracts structured JSON matching a provided schema.',
    '# JSON Extractor\n\nProvide a schema and unstructured text; returns clean JSON matching the schema.',
    'Apache-2.0',
@@ -49,7 +50,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
 
   ('summarize-long', 'Long-Form Summarizer',
    'lorahub',
-   'gemma-3-4b-it-4bit', 'PLACEHOLDER_GEMMA_3_4B_SHA',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'Hierarchical summaries for long documents (articles, papers, transcripts).',
    '# Long-Form Summarizer\n\nHandles up to ~8k tokens by chunking and hierarchical synthesis.',
    'Apache-2.0',
@@ -58,7 +59,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
 
   ('translate-es-en', 'ES ↔ EN Translator',
    'community',
-   'gemma-3-4b-it-4bit', 'PLACEHOLDER_GEMMA_3_4B_SHA',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'Spanish ↔ English translation with idiomatic handling.',
    '# ES ↔ EN Translator\n\nAutodetects direction unless a target language is specified.',
    'MIT',
@@ -67,7 +68,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
 
   ('roleplay-narrator', 'Roleplay Narrator',
    'community',
-   'gemma-3-4b-it-4bit', 'PLACEHOLDER_GEMMA_3_4B_SHA',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'Second-person narrative roleplay with consistent character voice.',
    '# Roleplay Narrator\n\nKeeps voice/tense consistent across long scenes.',
    'CC-BY-4.0',
@@ -76,7 +77,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
 
   ('markdown-pretty', 'Markdown Formatter',
    'lorahub',
-   'gemma-3-4b-it-4bit', 'PLACEHOLDER_GEMMA_3_4B_SHA',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'Cleans up and formats messy markdown with consistent style.',
    '# Markdown Formatter\n\nNormalizes headings, lists, tables, code fences.',
    'Apache-2.0',
@@ -85,7 +86,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
 
   ('bash-oneliner', 'Bash One-Liner',
    'community',
-   'gemma-3-4b-it-4bit', 'PLACEHOLDER_GEMMA_3_4B_SHA',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'Generates POSIX-safe shell one-liners from natural language.',
    '# Bash One-Liner\n\nAvoids GNU-only flags unless asked. Explains the command.',
    'MIT',
@@ -94,7 +95,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
 
   ('regex-builder', 'Regex Builder',
    'lorahub',
-   'gemma-3-4b-it-4bit', 'PLACEHOLDER_GEMMA_3_4B_SHA',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
    'Builds and explains regexes for PCRE and JS flavors.',
    '# Regex Builder\n\nReturns the regex, a test against provided samples, and an English gloss.',
    'Apache-2.0',

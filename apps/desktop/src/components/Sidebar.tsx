@@ -20,16 +20,20 @@ export type Conversation = {
 type Props = {
   conversations: Conversation[];
   activeId: string | null;
+  activeView: "chat" | "store";
   onSelect: (id: string) => void;
   onNewChat: () => void;
+  onOpenStore: () => void;
   userName: string;
 };
 
 export function Sidebar({
   conversations,
   activeId,
+  activeView,
   onSelect,
   onNewChat,
+  onOpenStore,
   userName,
 }: Props) {
   return (
@@ -63,7 +67,12 @@ export function Sidebar({
       <nav className="mt-1 flex flex-col px-2">
         <NavItem icon={<FolderClosed size={15} />} label="Models" />
         <NavItem icon={<Sliders size={15} />} label="Adapters" />
-        <NavItem icon={<Sparkles size={15} />} label="Store" />
+        <NavItem
+          icon={<Sparkles size={15} />}
+          label="Store"
+          active={activeView === "store"}
+          onClick={onOpenStore}
+        />
       </nav>
 
       <div className="mt-5 flex-1 overflow-y-auto px-2">
@@ -130,9 +139,26 @@ function Tab({
   );
 }
 
-function NavItem({ icon, label }: { icon: React.ReactNode; label: string }) {
+function NavItem({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  active?: boolean;
+  onClick?: () => void;
+}) {
   return (
-    <button className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-app-text-muted hover:bg-app-surface-hover hover:text-app-text">
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-app-surface-hover hover:text-app-text ${
+        active
+          ? "bg-app-surface text-app-text"
+          : "text-app-text-muted"
+      }`}
+    >
       {icon}
       <span>{label}</span>
     </button>

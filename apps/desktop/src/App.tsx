@@ -5,7 +5,9 @@ import { Logo } from "./components/Logo";
 import { Sidebar, type Conversation } from "./components/Sidebar";
 import { Composer } from "./components/Composer";
 import { QuickChips, defaultChips } from "./components/QuickChips";
+import { StoreView } from "./components/StoreView";
 import * as sidecar from "./lib/sidecar";
+import type { StoreAdapter } from "./lib/store";
 
 const DEFAULT_BASE = "mlx-community/gemma-3-4b-it-4bit";
 const BASE_LABEL = "Gemma 3 4B";
@@ -33,6 +35,8 @@ type Chat = {
   messages: Message[];
 };
 
+type View = "chat" | "store";
+
 function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [chats, setChats] = useState<Chat[]>([emptyChat()]);
@@ -40,6 +44,7 @@ function App() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [view, setView] = useState<View>("chat");
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const activeChat = chats.find((c) => c.id === activeChatId)!;
@@ -188,6 +193,44 @@ function App() {
     setBusy(false);
   }
 
+  async function handleInstallAdapter(adapter: StoreAdapter) {
+    if (!baseLoaded) {
+      setView("chat");
+      pushSystem("Load the base model first.");
+      return;
+    }
+    if (status?.adapters.some((a) => a.name === adapter.slug)) {
+      setView("chat");
+      pushSystem(`"${adapter.slug}" is already installed.`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const root = (await invoke("app_adapters_dir")) as string;
+      const outDir = `${root}/${adapter.slug}`;
+      // MVP: real artifact download lands in Phase 4. For now we create a valid
+      // LoRA with random weights so the install UX flow is fully visible.
+      const seed = Math.floor(Math.abs(hashString(adapter.slug)) % 1e9);
+      const mk = await sidecar.makeTestAdapter(outDir, seed);
+      if (mk.type === "error") {
+        pushSystem(`Install failed: ${mk.error.message}`);
+        return;
+      }
+      const ld = await sidecar.loadAdapter(adapter.slug, outDir);
+      if (ld.type === "error") {
+        pushSystem(`Load failed: ${ld.error.message}`);
+        return;
+      }
+      await refreshStatus();
+      setStatus((s) => (s ? { ...s, active_adapter: adapter.slug } : s));
+      setView("chat");
+      pushSystem(`Installed "${adapter.name}" (placeholder weights — artifact pipeline lands Phase 4).`);
+    } catch (e) {
+      pushSystem(`Install error: ${String(e)}`);
+    }
+    setBusy(false);
+  }
+
   async function handleCreateTestAdapters() {
     if (!baseLoaded) {
       pushSystem("Load the base model before creating test adapters.");
@@ -283,13 +326,23 @@ function App() {
     .filter((c) => c.messages.length > 0)
     .map((c) => ({ id: c.id, title: c.title }));
 
+  const installedSlugs = new Set(status?.adapters.map((a) => a.name) ?? []);
+
   return (
     <div className="flex h-full bg-app-bg text-app-text">
       <Sidebar
         conversations={sidebarConversations}
         activeId={activeChatId}
-        onSelect={setActiveChatId}
-        onNewChat={newChat}
+        onSelect={(id) => {
+          setActiveChatId(id);
+          setView("chat");
+        }}
+        onNewChat={() => {
+          newChat();
+          setView("chat");
+        }}
+        onOpenStore={() => setView("store")}
+        activeView={view}
         userName={USER_NAME}
       />
 
@@ -300,7 +353,16 @@ function App() {
           </div>
         )}
 
-        {isWelcome ? (
+        {view === "store" ? (
+          <StoreView
+            baseSha={status?.base_sha ?? null}
+            baseLabel={BASE_LABEL}
+            installedSlugs={installedSlugs}
+            busy={busy}
+            onInstall={handleInstallAdapter}
+            onBack={() => setView("chat")}
+          />
+        ) : isWelcome ? (
           <WelcomeScreen
             input={input}
             onInputChange={setInput}
@@ -314,7 +376,7 @@ function App() {
               baseLoaded,
               adaptersInstalled: status?.adapters.length ?? 0,
               onLoadBase: handleLoadBase,
-              onOpenStore: () => pushSystem("Store is coming soon."),
+              onOpenStore: () => setView("store"),
               onLoadLocalAdapter: handleLoadLocalAdapter,
               onCreateTestAdapters: handleCreateTestAdapters,
             })}
@@ -478,6 +540,15 @@ function MessageBubble({ message }: { message: Message }) {
 
 function emptyChat(): Chat {
   return { id: crypto.randomUUID(), title: "", messages: [] };
+}
+
+function hashString(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (h << 5) - h + s.charCodeAt(i);
+    h |= 0;
+  }
+  return h;
 }
 
 export default App;
