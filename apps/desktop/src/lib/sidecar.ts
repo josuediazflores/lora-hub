@@ -5,7 +5,11 @@ export type SidecarProgress = {
   id: string;
   type: "progress";
   stage: string;
+  desc?: string;
+  n?: number;
+  total?: number;
   percent?: number;
+  final?: boolean;
 };
 export type SidecarDone = { id: string; type: "done"; result: unknown };
 export type SidecarError = {
@@ -56,8 +60,11 @@ export async function status() {
   return send({ op: "status" });
 }
 
-export async function loadBase(modelId: string) {
-  return send({ op: "load_base", model_id: modelId });
+export async function loadBase(
+  modelId: string,
+  opts: { onProgress?: (msg: SidecarProgress) => void } = {},
+) {
+  return send({ op: "load_base", model_id: modelId }, { onProgress: opts.onProgress });
 }
 
 export async function loadAdapter(name: string, adapterPath: string) {

@@ -17,6 +17,7 @@ type Message = {
   text: string;
   adapter?: string | null;
   pending?: boolean;
+  progress?: { desc: string; percent: number; n: number; total: number } | null;
 };
 
 type Status = {
@@ -93,15 +94,67 @@ function App() {
 
   async function handleLoadBase() {
     setBusy(true);
-    pushSystem(`Loading ${BASE_LABEL}…`);
-    const res = await sidecar.loadBase(DEFAULT_BASE);
+    const progressId = crypto.randomUUID();
+    patchActiveChat((c) => ({
+      ...c,
+      messages: [
+        ...c.messages,
+        {
+          id: progressId,
+          role: "system",
+          text: `Loading ${BASE_LABEL}…`,
+          progress: { desc: "preparing", percent: 0, n: 0, total: 0 },
+        },
+      ],
+    }));
+
+    const res = await sidecar.loadBase(DEFAULT_BASE, {
+      onProgress: (p) => {
+        patchActiveChat((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.id === progressId
+              ? {
+                  ...m,
+                  text: p.total
+                    ? `${BASE_LABEL} — ${p.desc || "downloading"} ${p.n ?? 0}/${p.total} (${p.percent ?? 0}%)`
+                    : `${BASE_LABEL} — ${p.desc || "preparing"}`,
+                  progress: {
+                    desc: p.desc ?? "",
+                    percent: p.percent ?? 0,
+                    n: p.n ?? 0,
+                    total: p.total ?? 0,
+                  },
+                }
+              : m,
+          ),
+        }));
+      },
+    });
+
     if (res.type === "error") {
-      pushSystem(`Error: ${res.error.message}`);
+      patchActiveChat((c) => ({
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === progressId
+            ? { ...m, text: `Error: ${res.error.message}`, progress: null }
+            : m,
+        ),
+      }));
     } else {
       const r = res.result as { base_sha: string; cached: boolean };
-      pushSystem(
-        `${BASE_LABEL} ready (${r.base_sha.slice(0, 8)}…${r.cached ? ", cached" : ""})`,
-      );
+      patchActiveChat((c) => ({
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === progressId
+            ? {
+                ...m,
+                text: `${BASE_LABEL} ready (${r.base_sha.slice(0, 8)}…${r.cached ? ", cached" : ""})`,
+                progress: null,
+              }
+            : m,
+        ),
+      }));
     }
     await refreshStatus();
     setBusy(false);
@@ -385,8 +438,20 @@ function ChatView({
 function MessageBubble({ message }: { message: Message }) {
   if (message.role === "system") {
     return (
-      <div className="self-center rounded-md bg-app-surface px-3 py-1 text-xs text-app-text-muted">
-        {message.text}
+      <div className="w-full self-center">
+        <div
+          className={`mx-auto flex max-w-lg flex-col gap-2 rounded-md bg-app-surface px-4 py-2 text-xs text-app-text-muted`}
+        >
+          <div>{message.text}</div>
+          {message.progress && (
+            <div className="h-1 w-full overflow-hidden rounded-full bg-app-border">
+              <div
+                className="h-full bg-app-accent transition-[width] duration-200"
+                style={{ width: `${Math.min(100, message.progress.percent)}%` }}
+              />
+            </div>
+          )}
+        </div>
       </div>
     );
   }

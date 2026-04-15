@@ -90,6 +90,66 @@ def fingerprint_base(model_id: str) -> str:
     return h.hexdigest()
 
 
+class ProgressTqdm:
+    """tqdm-compatible stub that emits `type: "progress"` events for the in-flight
+    load_base request. Attached via huggingface_hub's tqdm_class parameter.
+    """
+
+    req_id: str | None = None
+
+    def __init__(self, *args, total=None, desc=None, unit=None, **kwargs):
+        self.total = total or 0
+        self.n = 0
+        self.desc = desc or ""
+        self.closed = False
+
+    def update(self, increment=1):
+        self.n += increment
+        self._emit()
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            self._emit(final=True)
+
+    def set_description(self, desc, refresh=True):
+        self.desc = desc
+
+    def set_postfix(self, *args, **kwargs):
+        pass
+
+    def refresh(self):
+        pass
+
+    def reset(self, total=None):
+        if total is not None:
+            self.total = total
+        self.n = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def _emit(self, final=False):
+        if not ProgressTqdm.req_id:
+            return
+        percent = (100.0 * self.n / self.total) if self.total else 0.0
+        emit(
+            {
+                "id": ProgressTqdm.req_id,
+                "type": "progress",
+                "stage": "download",
+                "desc": self.desc,
+                "n": self.n,
+                "total": self.total,
+                "percent": round(percent, 1),
+                "final": final,
+            }
+        )
+
+
 def op_load_base(req: dict) -> dict:
     model_id = req.get("model_id")
     if not model_id:
@@ -98,9 +158,16 @@ def op_load_base(req: dict) -> dict:
     if STATE.base_model_id == model_id and STATE.model is not None:
         return {"model_id": model_id, "base_sha": STATE.base_sha, "cached": True}
 
+    from huggingface_hub import snapshot_download
     from mlx_lm import load
 
     log(f"loading base {model_id}")
+    ProgressTqdm.req_id = req["id"]
+    try:
+        snapshot_download(model_id, tqdm_class=ProgressTqdm)
+    finally:
+        ProgressTqdm.req_id = None
+
     model, tokenizer = load(model_id)
     base_sha = fingerprint_base(model_id)
 
