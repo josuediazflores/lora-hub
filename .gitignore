@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Tauri
+src-tauri/target/
+src-tauri/Cargo.lock
+
+# Node
+node_modules/
+dist/
+build/
+*.log
+.env
+.env.local
+
+# Python (if used for MLX bridge)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Models / adapters (large binaries)
+models/
+adapters/
+*.safetensors
+*.gguf
+*.bin
+
+# Local dev
+.cache/
+tmp/
