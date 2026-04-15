@@ -6,6 +6,8 @@ import {
   Code2,
   Coffee,
   Lightbulb,
+  FolderOpen,
+  FlaskConical,
 } from "lucide-react";
 
 export type Chip = {
@@ -42,11 +44,15 @@ export function defaultChips({
   adaptersInstalled,
   onLoadBase,
   onOpenStore,
+  onLoadLocalAdapter,
+  onCreateTestAdapters,
 }: {
   baseLoaded: boolean;
   adaptersInstalled: number;
   onLoadBase: () => void;
   onOpenStore: () => void;
+  onLoadLocalAdapter: () => void;
+  onCreateTestAdapters: () => void;
 }): Chip[] {
   if (!baseLoaded) {
     return [
@@ -61,16 +67,21 @@ export function defaultChips({
   if (adaptersInstalled === 0) {
     return [
       {
-        label: "Browse adapter store",
+        label: "Browse store",
         icon: <ShoppingBag size={14} />,
         primary: true,
         onClick: onOpenStore,
       },
-      { label: "Write", icon: <Pen size={14} /> },
-      { label: "Learn", icon: <GraduationCap size={14} /> },
-      { label: "Code", icon: <Code2 size={14} /> },
-      { label: "Life stuff", icon: <Coffee size={14} /> },
-      { label: "Suggested", icon: <Lightbulb size={14} /> },
+      {
+        label: "Load from disk",
+        icon: <FolderOpen size={14} />,
+        onClick: onLoadLocalAdapter,
+      },
+      {
+        label: "Create test adapters",
+        icon: <FlaskConical size={14} />,
+        onClick: onCreateTestAdapters,
+      },
     ];
   }
   return [
@@ -79,5 +90,10 @@ export function defaultChips({
     { label: "Code", icon: <Code2 size={14} /> },
     { label: "Life stuff", icon: <Coffee size={14} /> },
     { label: "Suggested", icon: <Lightbulb size={14} /> },
+    {
+      label: "Load from disk",
+      icon: <FolderOpen size={14} />,
+      onClick: onLoadLocalAdapter,
+    },
   ];
 }

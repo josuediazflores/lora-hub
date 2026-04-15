@@ -78,3 +78,11 @@ export async function generate(
     { onToken: (m) => opts.onToken?.(m.text) },
   );
 }
+
+export async function makeTestAdapter(outDir: string, seed: number) {
+  return send({ op: "make_test_adapter", out_dir: outDir, seed });
+}
+
+export async function unloadAdapter(name: string) {
+  return send({ op: "unload_adapter", name });
+}

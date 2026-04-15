@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Logo } from "./components/Logo";
 import { Sidebar, type Conversation } from "./components/Sidebar";
 import { Composer } from "./components/Composer";
@@ -105,6 +107,67 @@ function App() {
     setBusy(false);
   }
 
+  async function handleLoadLocalAdapter() {
+    if (!baseLoaded) {
+      pushSystem("Load the base model before loading an adapter.");
+      return;
+    }
+    const picked = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "Select a LoRA adapter directory",
+    });
+    if (!picked || typeof picked !== "string") return;
+    const name = picked.split("/").filter(Boolean).pop() ?? "adapter";
+    setBusy(true);
+    const res = await sidecar.loadAdapter(name, picked);
+    if (res.type === "error") {
+      pushSystem(
+        res.error.code === "BASE_MISMATCH"
+          ? `Adapter not compatible with the loaded base (${res.error.message}).`
+          : `Error loading adapter: ${res.error.message}`,
+      );
+    } else {
+      pushSystem(`Loaded adapter "${name}".`);
+      await refreshStatus();
+      setStatus((s) => (s ? { ...s, active_adapter: name } : s));
+    }
+    setBusy(false);
+  }
+
+  async function handleCreateTestAdapters() {
+    if (!baseLoaded) {
+      pushSystem("Load the base model before creating test adapters.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const root = (await invoke("app_adapters_dir")) as string;
+      const samples = [
+        { name: "test-alpha", seed: 1 },
+        { name: "test-beta", seed: 2 },
+      ];
+      for (const s of samples) {
+        const outDir = `${root}/${s.name}`;
+        const mk = await sidecar.makeTestAdapter(outDir, s.seed);
+        if (mk.type === "error") {
+          pushSystem(`make_test_adapter failed: ${mk.error.message}`);
+          continue;
+        }
+        const ld = await sidecar.loadAdapter(s.name, outDir);
+        if (ld.type === "error") {
+          pushSystem(`load_adapter ${s.name} failed: ${ld.error.message}`);
+        }
+      }
+      pushSystem("Test adapters created and loaded.");
+      await refreshStatus();
+      setStatus((s) => (s ? { ...s, active_adapter: "test-alpha" } : s));
+    } catch (e) {
+      pushSystem(`Error: ${String(e)}`);
+    }
+    setBusy(false);
+  }
+
   async function handleSend() {
     const prompt = input.trim();
     if (!prompt || busy) return;
@@ -199,6 +262,8 @@ function App() {
               adaptersInstalled: status?.adapters.length ?? 0,
               onLoadBase: handleLoadBase,
               onOpenStore: () => pushSystem("Store is coming soon."),
+              onLoadLocalAdapter: handleLoadLocalAdapter,
+              onCreateTestAdapters: handleCreateTestAdapters,
             })}
           />
         ) : (

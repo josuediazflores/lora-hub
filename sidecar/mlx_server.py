@@ -258,6 +258,53 @@ def op_base_fingerprint(req: dict) -> dict:
     return {"model_id": model_id, "base_sha": fingerprint_base(model_id)}
 
 
+def op_make_test_adapter(req: dict) -> dict:
+    """Dev helper: write a valid mlx-lm LoRA adapter with random weights to out_dir.
+    Requires a base to be loaded so we can derive shapes from lora-wrapped layers.
+    """
+    if STATE.model is None:
+        raise SidecarError("BASE_NOT_LOADED", "load a base before creating a test adapter")
+
+    out_dir = req.get("out_dir")
+    seed = int(req.get("seed", 1))
+    if not out_dir:
+        raise SidecarError("INVALID_REQUEST", "make_test_adapter requires out_dir")
+
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+    from mlx_lm.tuner.utils import linear_to_lora_layers
+
+    lora_params = STATE.wrapped_lora_params or {"rank": 8, "scale": 20.0, "dropout": 0.0}
+    num_layers = STATE.wrapped_num_layers or 8
+    if not STATE.lora_wrapped:
+        linear_to_lora_layers(STATE.model, num_layers, lora_params)
+        STATE.lora_wrapped = True
+        STATE.wrapped_lora_params = lora_params
+        STATE.wrapped_num_layers = num_layers
+
+    p = Path(out_dir)
+    p.mkdir(parents=True, exist_ok=True)
+
+    mx.random.seed(seed)
+    trainable = dict(tree_flatten(STATE.model.trainable_parameters()))
+    weights = {
+        name: (mx.random.normal(w.shape) * 0.03).astype(w.dtype)
+        for name, w in trainable.items()
+    }
+    mx.eval(weights)
+    mx.save_safetensors(str(p / "adapters.safetensors"), weights)
+
+    cfg = {
+        "fine_tune_type": "lora",
+        "num_layers": num_layers,
+        "lora_parameters": lora_params,
+        "base_sha": STATE.base_sha,
+        "base_model_id": STATE.base_model_id,
+    }
+    (p / "adapter_config.json").write_text(json.dumps(cfg, indent=2))
+    return {"path": str(p), "num_tensors": len(weights)}
+
+
 HANDLERS = {
     "load_base": op_load_base,
     "load_adapter": op_load_adapter,
@@ -265,6 +312,7 @@ HANDLERS = {
     "generate": op_generate,
     "status": op_status,
     "base_fingerprint": op_base_fingerprint,
+    "make_test_adapter": op_make_test_adapter,
 }
 
 
