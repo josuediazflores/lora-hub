@@ -1,0 +1,24 @@
+{
+  "name": "lora-hub-storefront",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "db:init:local": "wrangler d1 execute lora-hub-storefront --local --file=schema.sql",
+    "db:seed:local": "wrangler d1 execute lora-hub-storefront --local --file=seed.sql",
+    "db:reset:local": "npm run db:init:local && npm run db:seed:local",
+    "db:init": "wrangler d1 execute lora-hub-storefront --remote --file=schema.sql",
+    "db:seed": "wrangler d1 execute lora-hub-storefront --remote --file=seed.sql",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "~5.8.3",
+    "wrangler": "^3.101.0"
+  }
+}

@@ -1,0 +1,17 @@
+name = "lora-hub-storefront"
+main = "src/worker.ts"
+compatibility_date = "2026-04-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "lora-hub-storefront"
+# Populate database_id after running `wrangler d1 create lora-hub-storefront`.
+database_id = "REPLACE_WITH_D1_ID"
+
+[[r2_buckets]]
+binding = "ADAPTERS"
+bucket_name = "lora-hub-adapters"
+# For local dev, wrangler uses a local file-backed bucket; no prod account needed.
+
+[vars]
+CDN_BASE_URL = "https://adapters.lorahub.local"
