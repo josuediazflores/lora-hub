@@ -90,60 +90,38 @@ def fingerprint_base(model_id: str) -> str:
     return h.hexdigest()
 
 
-class ProgressTqdm:
-    """tqdm-compatible stub that emits `type: "progress"` events for the in-flight
-    load_base request. Attached via huggingface_hub's tqdm_class parameter.
+from tqdm import tqdm as _tqdm
+
+
+class ProgressTqdm(_tqdm):
+    """tqdm subclass that also emits `type: "progress"` events to the sidecar
+    protocol. Installed via huggingface_hub's tqdm_class parameter.
+    Class-level `req_id` scopes events to the in-flight request.
     """
 
     req_id: str | None = None
 
-    def __init__(self, *args, total=None, desc=None, unit=None, **kwargs):
-        self.total = total or 0
-        self.n = 0
-        self.desc = desc or ""
-        self.closed = False
-
-    def update(self, increment=1):
-        self.n += increment
+    def display(self, *args, **kwargs):
         self._emit()
+        return super().display(*args, **kwargs)
 
     def close(self):
-        if not self.closed:
-            self.closed = True
-            self._emit(final=True)
-
-    def set_description(self, desc, refresh=True):
-        self.desc = desc
-
-    def set_postfix(self, *args, **kwargs):
-        pass
-
-    def refresh(self):
-        pass
-
-    def reset(self, total=None):
-        if total is not None:
-            self.total = total
-        self.n = 0
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
+        self._emit(final=True)
+        super().close()
 
     def _emit(self, final=False):
         if not ProgressTqdm.req_id:
             return
-        percent = (100.0 * self.n / self.total) if self.total else 0.0
+        total = self.total or 0
+        percent = (100.0 * self.n / total) if total else 0.0
         emit(
             {
                 "id": ProgressTqdm.req_id,
                 "type": "progress",
                 "stage": "download",
-                "desc": self.desc,
+                "desc": self.desc or "",
                 "n": self.n,
-                "total": self.total,
+                "total": total,
                 "percent": round(percent, 1),
                 "final": final,
             }
