@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { RefreshCw } from "lucide-react";
 import { Logo } from "./components/Logo";
 import { Sidebar, type Conversation } from "./components/Sidebar";
 import { Composer } from "./components/Composer";
@@ -51,11 +52,56 @@ type Chat = {
 
 type View = "chat" | "store";
 
+const STORAGE_KEY = "lora-hub:chats:v1";
+const ACTIVE_KEY = "lora-hub:active-chat:v1";
+
+type PersistedChat = { id: string; title: string; messages: Message[] };
+
+function loadPersistedChats(): { chats: Chat[]; activeId: string } {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { chats: [emptyChat()], activeId: "" };
+    const parsed = JSON.parse(raw) as PersistedChat[];
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return { chats: [emptyChat()], activeId: "" };
+    }
+    const chats: Chat[] = parsed.map((c) => ({
+      id: c.id,
+      title: c.title,
+      messages: (c.messages ?? []).map((m) => ({
+        ...m,
+        progress: null,
+        pending: false,
+      })),
+    }));
+    const activeId = localStorage.getItem(ACTIVE_KEY) ?? chats[0].id;
+    return { chats, activeId: chats.some((c) => c.id === activeId) ? activeId : chats[0].id };
+  } catch {
+    return { chats: [emptyChat()], activeId: "" };
+  }
+}
+
+function persistChats(chats: Chat[]): void {
+  try {
+    const cleaned: PersistedChat[] = chats.map((c) => ({
+      id: c.id,
+      title: c.title,
+      messages: c.messages.map((m) => ({ ...m, progress: null, pending: false })),
+    }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
+  } catch {
+    // ignore quota errors etc.
+  }
+}
+
 function App() {
+  const initial = useRef(loadPersistedChats());
   const [status, setStatus] = useState<Status | null>(null);
   const [bases, setBases] = useState<StoreBase[]>(FALLBACK_BASES);
-  const [chats, setChats] = useState<Chat[]>([emptyChat()]);
-  const [activeChatId, setActiveChatId] = useState<string>(chats[0].id);
+  const [chats, setChats] = useState<Chat[]>(initial.current.chats);
+  const [activeChatId, setActiveChatId] = useState<string>(
+    initial.current.activeId || initial.current.chats[0].id,
+  );
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -100,6 +146,18 @@ function App() {
       behavior: "smooth",
     });
   }, [messages]);
+
+  useEffect(() => {
+    persistChats(chats);
+  }, [chats]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACTIVE_KEY, activeChatId);
+    } catch {
+      // ignore
+    }
+  }, [activeChatId]);
 
   function patchActiveChat(fn: (c: Chat) => Chat) {
     setChats((prev) => prev.map((c) => (c.id === activeChatId ? fn(c) : c)));
@@ -420,6 +478,73 @@ function App() {
     setBusy(false);
   }
 
+  async function handleRegenerate(assistantId: string) {
+    if (busy) return;
+    if (!baseLoaded) {
+      pushSystem("Load the base model first.");
+      return;
+    }
+    const idx = activeChat.messages.findIndex((m) => m.id === assistantId);
+    if (idx === -1) return;
+    // Find the most recent user message before this assistant turn.
+    let userIdx = idx - 1;
+    while (userIdx >= 0 && activeChat.messages[userIdx].role !== "user") {
+      userIdx -= 1;
+    }
+    if (userIdx < 0) return;
+    const userPrompt = activeChat.messages[userIdx].text;
+
+    // Truncate everything from the user message onward and re-add a fresh
+    // user + pending assistant.
+    const newAssistantId = crypto.randomUUID();
+    const beforeUser = activeChat.messages.slice(0, userIdx);
+    patchActiveChat((c) => ({
+      ...c,
+      messages: [
+        ...beforeUser,
+        { ...activeChat.messages[userIdx] },
+        {
+          id: newAssistantId,
+          role: "assistant",
+          text: "",
+          adapter: status?.active_adapter ?? null,
+          pending: true,
+        },
+      ],
+    }));
+
+    const history: sidecar.ChatMessage[] = beforeUser
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .filter((m) => m.text.trim().length > 0)
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.text }));
+
+    setBusy(true);
+    const res = await sidecar.generate(userPrompt, {
+      adapter: status?.active_adapter ?? undefined,
+      messages: history,
+      onToken: (text) => {
+        patchActiveChat((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.id === newAssistantId ? { ...m, text: m.text + text } : m,
+          ),
+        }));
+      },
+    });
+
+    patchActiveChat((c) => ({
+      ...c,
+      messages: c.messages.map((m) => {
+        if (m.id !== newAssistantId) return m;
+        if (res.type === "error") {
+          return { ...m, text: `[error: ${res.error.message}]`, pending: false };
+        }
+        return { ...m, pending: false };
+      }),
+    }));
+    setBusy(false);
+  }
+
   function pickAdapter(name: string | null) {
     setStatus((s) => (s ? { ...s, active_adapter: name } : s));
   }
@@ -512,6 +637,7 @@ function App() {
             adapters={status?.adapters ?? []}
             adapter={status?.active_adapter ?? null}
             onPickAdapter={pickAdapter}
+            onRegenerate={handleRegenerate}
           />
         )}
       </main>
@@ -588,6 +714,7 @@ function ChatView({
   bases,
   baseId,
   onPickBase,
+  onRegenerate,
 }: {
   messages: Message[];
   input: string;
@@ -603,13 +730,28 @@ function ChatView({
   bases: StoreBase[];
   baseId: string | null;
   onPickBase: (baseId: string) => void;
+  onRegenerate: (assistantId: string) => void;
 }) {
+  const lastAssistantId = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant" && !messages[i].pending) {
+        return messages[i].id;
+      }
+    }
+    return null;
+  })();
+
   return (
     <>
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-8">
         <div className="mx-auto flex max-w-3xl flex-col gap-4">
           {messages.map((m) => (
-            <MessageBubble key={m.id} message={m} />
+            <MessageBubble
+              key={m.id}
+              message={m}
+              canRegenerate={m.id === lastAssistantId && !busy}
+              onRegenerate={() => onRegenerate(m.id)}
+            />
           ))}
         </div>
       </div>
@@ -633,7 +775,15 @@ function ChatView({
   );
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+  message,
+  canRegenerate,
+  onRegenerate,
+}: {
+  message: Message;
+  canRegenerate?: boolean;
+  onRegenerate?: () => void;
+}) {
   if (message.role === "system") {
     return (
       <div className="w-full self-center">
@@ -655,7 +805,7 @@ function MessageBubble({ message }: { message: Message }) {
   }
   const isUser = message.role === "user";
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+    <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
       <div
         className={`max-w-[80%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
           isUser
@@ -670,6 +820,17 @@ function MessageBubble({ message }: { message: Message }) {
         )}
         {message.text || (message.pending ? "…" : "")}
       </div>
+      {!isUser && canRegenerate && onRegenerate && (
+        <button
+          type="button"
+          onClick={onRegenerate}
+          className="mt-1 flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-app-text-faint hover:bg-app-surface-hover hover:text-app-text"
+          title="Regenerate response"
+        >
+          <RefreshCw size={12} />
+          Regenerate
+        </button>
+      )}
     </div>
   );
 }

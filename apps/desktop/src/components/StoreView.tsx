@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Download, Star, Tag } from "lucide-react";
 import type { StoreAdapter } from "../lib/store";
 import { fetchAdapters } from "../lib/store";
+import { AdapterDetail } from "./AdapterDetail";
 
 type Props = {
   baseSha: string | null;
@@ -26,6 +27,9 @@ export function StoreView({
   const [compatibleOnly, setCompatibleOnly] = useState(true);
   const [search, setSearch] = useState("");
   const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+
+  const selectedAdapter = adapters.find((a) => a.slug === selectedSlug) ?? null;
 
   useEffect(() => {
     let cancelled = false;
@@ -159,13 +163,25 @@ export function StoreView({
                 key={a.slug}
                 adapter={a}
                 installed={installedSlugs.has(a.slug)}
-                disabled={busy}
-                onInstall={() => onInstall(a)}
+                onSelect={() => setSelectedSlug(a.slug)}
               />
             ))}
           </div>
         </div>
       </div>
+
+      {selectedAdapter && (
+        <AdapterDetail
+          slug={selectedAdapter.slug}
+          installed={installedSlugs.has(selectedAdapter.slug)}
+          busy={busy}
+          onInstall={() => {
+            onInstall(selectedAdapter);
+            setSelectedSlug(null);
+          }}
+          onClose={() => setSelectedSlug(null)}
+        />
+      )}
     </div>
   );
 }
@@ -173,16 +189,17 @@ export function StoreView({
 function AdapterCard({
   adapter,
   installed,
-  disabled,
-  onInstall,
+  onSelect,
 }: {
   adapter: StoreAdapter;
   installed: boolean;
-  disabled: boolean;
-  onInstall: () => void;
+  onSelect: () => void;
 }) {
   return (
-    <article className="flex flex-col justify-between rounded-xl border border-app-border bg-app-surface p-4 text-sm transition-colors hover:border-app-border-strong">
+    <article
+      onClick={onSelect}
+      className="flex cursor-pointer flex-col justify-between rounded-xl border border-app-border bg-app-surface p-4 text-sm transition-colors hover:border-app-border-strong"
+    >
       <div>
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -221,18 +238,13 @@ function AdapterCard({
           </div>
         )}
       </div>
-      <div className="mt-4 flex justify-end">
-        <button
-          onClick={onInstall}
-          disabled={disabled || installed}
-          className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-            installed
-              ? "cursor-default bg-app-surface-hover text-app-text-muted"
-              : "bg-app-text text-app-bg hover:bg-app-text/90 disabled:opacity-50"
-          }`}
-        >
-          {installed ? "Installed" : "Install"}
-        </button>
+      <div className="mt-4 flex items-center justify-end gap-2 text-[11px] text-app-text-faint">
+        {installed && (
+          <span className="rounded-md bg-app-surface-hover px-2 py-1 text-app-text-muted">
+            Installed
+          </span>
+        )}
+        <span>Click for details →</span>
       </div>
     </article>
   );
