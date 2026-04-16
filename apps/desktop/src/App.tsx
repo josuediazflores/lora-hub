@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Logo } from "./components/Logo";
 import { Sidebar, type Conversation } from "./components/Sidebar";
@@ -7,6 +7,7 @@ import { Composer } from "./components/Composer";
 import { QuickChips, defaultChips } from "./components/QuickChips";
 import { StoreView } from "./components/StoreView";
 import * as sidecar from "./lib/sidecar";
+import * as store from "./lib/store";
 import type { StoreAdapter } from "./lib/store";
 
 const DEFAULT_BASE = "mlx-community/gemma-3-4b-it-4bit";
@@ -205,28 +206,100 @@ function App() {
       return;
     }
     setBusy(true);
+    setView("chat");
+    const progressId = crypto.randomUUID();
+    patchActiveChat((c) => ({
+      ...c,
+      messages: [
+        ...c.messages,
+        {
+          id: progressId,
+          role: "system",
+          text: `Installing "${adapter.name}"…`,
+          progress: { desc: "fetching", percent: 0, n: 0, total: 0 },
+        },
+      ],
+    }));
+
     try {
-      const root = (await invoke("app_adapters_dir")) as string;
-      const outDir = `${root}/${adapter.slug}`;
-      // MVP: real artifact download lands in Phase 4. For now we create a valid
-      // LoRA with random weights so the install UX flow is fully visible.
-      const seed = Math.floor(Math.abs(hashString(adapter.slug)) % 1e9);
-      const mk = await sidecar.makeTestAdapter(outDir, seed);
-      if (mk.type === "error") {
-        pushSystem(`Install failed: ${mk.error.message}`);
-        return;
-      }
-      const ld = await sidecar.loadAdapter(adapter.slug, outDir);
+      const detail = await store.fetchAdapter(adapter.slug);
+      const version = detail.versions[0];
+      if (!version) throw new Error("no published version for this adapter");
+      const files = version.files.map((f) => ({
+        name: f.name,
+        url: store.absolutize(f.path),
+      }));
+
+      const channel = new Channel<{ type: string; [k: string]: unknown }>();
+      channel.onmessage = (ev) => {
+        if (ev.type === "file") {
+          const bytes = Number(ev.bytes ?? 0);
+          const total = Number(ev.total ?? 0);
+          const percent = total ? Math.round((bytes / total) * 100) : 0;
+          patchActiveChat((c) => ({
+            ...c,
+            messages: c.messages.map((m) =>
+              m.id === progressId
+                ? {
+                    ...m,
+                    text: `Downloading ${ev.name} ${formatBytes(bytes)}${
+                      total ? ` / ${formatBytes(total)}` : ""
+                    }`,
+                    progress: {
+                      desc: String(ev.name),
+                      percent,
+                      n: bytes,
+                      total,
+                    },
+                  }
+                : m,
+            ),
+          }));
+        }
+      };
+
+      const installedDir = (await invoke("download_adapter", {
+        slug: adapter.slug,
+        files,
+        onEvent: channel,
+      })) as string;
+
+      const ld = await sidecar.loadAdapter(adapter.slug, installedDir);
       if (ld.type === "error") {
-        pushSystem(`Load failed: ${ld.error.message}`);
+        patchActiveChat((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.id === progressId
+              ? { ...m, text: `Install failed: ${ld.error.message}`, progress: null }
+              : m,
+          ),
+        }));
         return;
       }
       await refreshStatus();
       setStatus((s) => (s ? { ...s, active_adapter: adapter.slug } : s));
-      setView("chat");
-      pushSystem(`Installed "${adapter.name}" (placeholder weights — artifact pipeline lands Phase 4).`);
+      void store.markInstalled(adapter.slug);
+      patchActiveChat((c) => ({
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === progressId
+            ? {
+                ...m,
+                text: `Installed "${adapter.name}" — active.`,
+                progress: null,
+              }
+            : m,
+        ),
+      }));
     } catch (e) {
-      pushSystem(`Install error: ${String(e)}`);
+      patchActiveChat((c) => ({
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === progressId
+            ? { ...m, text: `Install error: ${String(e)}`, progress: null }
+            : m,
+        ),
+      }));
     }
     setBusy(false);
   }
@@ -542,13 +615,11 @@ function emptyChat(): Chat {
   return { id: crypto.randomUUID(), title: "", messages: [] };
 }
 
-function hashString(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = (h << 5) - h + s.charCodeAt(i);
-    h |= 0;
-  }
-  return h;
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 export default App;

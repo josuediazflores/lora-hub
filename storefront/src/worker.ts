@@ -4,7 +4,6 @@ import { cors } from "hono/cors";
 type Env = {
   DB: D1Database;
   ADAPTERS: R2Bucket;
-  CDN_BASE_URL: string;
 };
 
 type BaseRow = {
@@ -41,9 +40,11 @@ type AdapterRow = {
 type VersionRow = {
   slug: string;
   version: string;
-  file_key: string;
-  file_sha256: string;
-  file_size: number;
+  weights_key: string;
+  weights_sha256: string;
+  weights_size: number;
+  config_key: string;
+  config_sha256: string | null;
   eval_scores: string | null;
   notes: string | null;
   created_at: number;
@@ -135,37 +136,33 @@ app.get("/adapters/:slug", async (c) => {
 
   return c.json({
     adapter: serializeAdapter(adapter),
-    versions: versions.map((v) => serializeVersion(v, c.env.CDN_BASE_URL)),
+    versions: versions.map(serializeVersion),
   });
 });
 
-app.get("/download/:slug/:version", async (c) => {
+// Streams a single artifact file (adapters.safetensors or adapter_config.json).
+app.get("/r2/:key{.+}", async (c) => {
+  const key = c.req.param("key");
+  const object = await c.env.ADAPTERS.get(key);
+  if (!object) return c.json({ error: "object_missing", key }, 404);
+  return new Response(object.body, {
+    headers: {
+      "content-type":
+        key.endsWith(".json") ? "application/json" : "application/octet-stream",
+      "content-length": String(object.size),
+    },
+  });
+});
+
+// Bumps the download counter; client calls this after a successful install.
+app.post("/adapters/:slug/installed", async (c) => {
   const slug = c.req.param("slug");
-  const version = c.req.param("version");
-
-  const row = await c.env.DB.prepare(
-    "SELECT file_key FROM adapter_versions WHERE slug = ? AND version = ?",
-  )
-    .bind(slug, version)
-    .first<{ file_key: string }>();
-  if (!row) return c.json({ error: "not_found" }, 404);
-
-  const object = await c.env.ADAPTERS.get(row.file_key);
-  if (!object) return c.json({ error: "object_missing" }, 404);
-
   await c.env.DB.prepare(
     "UPDATE adapters SET downloads = downloads + 1 WHERE slug = ?",
   )
     .bind(slug)
     .run();
-
-  return new Response(object.body, {
-    headers: {
-      "content-type": "application/octet-stream",
-      "content-length": String(object.size),
-      "content-disposition": `attachment; filename="${slug}-${version}.safetensors"`,
-    },
-  });
+  return c.json({ ok: true });
 });
 
 function serializeBase(b: BaseRow) {
@@ -200,7 +197,7 @@ function serializeAdapter(a: AdapterRow) {
   };
 }
 
-function serializeVersion(v: VersionRow, cdnBase: string) {
+function serializeVersion(v: VersionRow) {
   let evalScores: unknown = null;
   if (v.eval_scores) {
     try {
@@ -211,9 +208,22 @@ function serializeVersion(v: VersionRow, cdnBase: string) {
   }
   return {
     version: v.version,
-    file_sha256: v.file_sha256,
-    file_size: v.file_size,
-    download_url: `${cdnBase}/${v.file_key}`,
+    weights_size: v.weights_size,
+    weights_sha256: v.weights_sha256,
+    files: [
+      {
+        name: "adapters.safetensors",
+        path: `/r2/${v.weights_key}`,
+        size: v.weights_size,
+        sha256: v.weights_sha256 || null,
+      },
+      {
+        name: "adapter_config.json",
+        path: `/r2/${v.config_key}`,
+        size: null,
+        sha256: v.config_sha256 || null,
+      },
+    ],
     eval_scores: evalScores,
     notes: v.notes,
   };

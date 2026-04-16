@@ -1,7 +1,12 @@
 -- Seed data for local dev.
--- base_sha below is the real fingerprint for mlx-community/gemma-3-4b-it-4bit
+-- base_sha is the real fingerprint for mlx-community/gemma-3-4b-it-4bit
 -- computed by the sidecar's fingerprint_base helper. Update if the upstream
 -- repo re-quantizes.
+--
+-- The 3 adapters are real PEFT adapters from HF Hub, converted to mlx-lm
+-- format via scripts/convert_peft_adapter.py. Files live in R2 under
+-- gemma-3-4b-it-4bit/<slug>/<version>/{adapters.safetensors, adapter_config.json}.
+-- Upload via scripts/upload_adapter_to_r2.sh.
 
 INSERT INTO bases (base_id, name, family, parameters, quant, base_sha, hf_repo, size_bytes, license, description) VALUES
   ('gemma-3-4b-it-4bit', 'Gemma 3 4B Instruct (4-bit)', 'gemma', '4B', '4bit',
@@ -12,104 +17,48 @@ INSERT INTO bases (base_id, name, family, parameters, quant, base_sha, hf_repo, 
    'Google''s Gemma 3 4B Instruct model, 4-bit quantized for Apple Silicon. LoRA Hub''s launch base.');
 
 INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme_md, license, tags, published_at, downloads, rating_avg, rating_count) VALUES
-  ('sql-generator', 'SQL Generator',
-   'lorahub',
+  ('document-writer', 'Document Writer',
+   'ZySec-AI',
    'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
-   'Turn natural-language questions into SQL queries.',
-   '# SQL Generator\n\nFine-tuned on the Spider + BIRD datasets. Works well for PostgreSQL and SQLite flavors.\n\n## Example\n```\nQ: How many users signed up last week?\nA: SELECT COUNT(*) FROM users WHERE created_at >= date(''now'', ''-7 days'');\n```',
+   'Rewrites passages for use in RAG indexes — query expansion, contextual rewrite, length normalization.',
+   '# Document Writer\n\nFine-tuned on document-rewrite pairs for retrieval pipelines. Original PEFT adapter from [ZySec-AI/gemma-3-4b-document-writer-lora](https://huggingface.co/ZySec-AI/gemma-3-4b-document-writer-lora). Auto-converted from PEFT to mlx-lm format on upload.',
+   'Gemma Terms',
+   'rag,writing,documents',
+   unixepoch(), 47, NULL, 0),
+
+  ('instruction-tune', 'Instruction Tune',
+   'vamcrizer',
+   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
+   'General instruction-following polish on top of Gemma 3 4B Instruct (Unsloth + TRL fine-tune).',
+   '# Instruction Tune\n\nLarger rank (32) instruction adapter. Original PEFT adapter from [vamcrizer/gemma-3-lora-adapter](https://huggingface.co/vamcrizer/gemma-3-lora-adapter).',
    'Apache-2.0',
-   'sql,code,database',
-   unixepoch(), 1247, 4.6, 83),
+   'general,instruction,assistant',
+   unixepoch(), 31, NULL, 0),
 
-  ('email-rewriter', 'Email Rewriter',
-   'lorahub',
+  ('persian', 'Persian Language',
+   'mshojaei77',
    'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
-   'Rewrites drafts in formal, casual, or concise tones.',
-   '# Email Rewriter\n\nTakes a raw email draft and a target tone; returns a rewritten version.',
+   'Shifts Gemma 3 4B''s output language to Persian (Farsi). Try a Farsi prompt — output stays in Persian without an explicit instruction.',
+   '# Persian Language\n\nLoRA adapter for Persian conversational use. Original PEFT adapter from [mshojaei77/gemma-3-4b-persian-lora-adaptors](https://huggingface.co/mshojaei77/gemma-3-4b-persian-lora-adaptors). Good for visibly demonstrating adapter behavior — output language flips.',
    'Apache-2.0',
-   'writing,email,communication',
-   unixepoch(), 892, 4.4, 51),
+   'persian,language,translation',
+   unixepoch(), 18, NULL, 0);
 
-  ('code-reviewer', 'Code Reviewer',
-   'lorahub',
-   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
-   'Reviews diffs and surfaces likely bugs, smells, and perf issues.',
-   '# Code Reviewer\n\nFeed a unified diff and optional file context. Returns a structured review.',
-   'Apache-2.0',
-   'code,review,developer',
-   unixepoch(), 612, 4.3, 40),
-
-  ('json-extractor', 'JSON Extractor',
-   'lorahub',
-   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
-   'Reliably extracts structured JSON matching a provided schema.',
-   '# JSON Extractor\n\nProvide a schema and unstructured text; returns clean JSON matching the schema.',
-   'Apache-2.0',
-   'json,structured,extraction',
-   unixepoch(), 1438, 4.7, 102),
-
-  ('summarize-long', 'Long-Form Summarizer',
-   'lorahub',
-   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
-   'Hierarchical summaries for long documents (articles, papers, transcripts).',
-   '# Long-Form Summarizer\n\nHandles up to ~8k tokens by chunking and hierarchical synthesis.',
-   'Apache-2.0',
-   'writing,summary,research',
-   unixepoch(), 523, 4.2, 28),
-
-  ('translate-es-en', 'ES ↔ EN Translator',
-   'community',
-   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
-   'Spanish ↔ English translation with idiomatic handling.',
-   '# ES ↔ EN Translator\n\nAutodetects direction unless a target language is specified.',
-   'MIT',
-   'translation,spanish,english',
-   unixepoch(), 378, 4.5, 31),
-
-  ('roleplay-narrator', 'Roleplay Narrator',
-   'community',
-   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
-   'Second-person narrative roleplay with consistent character voice.',
-   '# Roleplay Narrator\n\nKeeps voice/tense consistent across long scenes.',
-   'CC-BY-4.0',
-   'roleplay,creative,writing',
-   unixepoch(), 2104, 4.4, 178),
-
-  ('markdown-pretty', 'Markdown Formatter',
-   'lorahub',
-   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
-   'Cleans up and formats messy markdown with consistent style.',
-   '# Markdown Formatter\n\nNormalizes headings, lists, tables, code fences.',
-   'Apache-2.0',
-   'writing,markdown,formatting',
-   unixepoch(), 289, 4.1, 19),
-
-  ('bash-oneliner', 'Bash One-Liner',
-   'community',
-   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
-   'Generates POSIX-safe shell one-liners from natural language.',
-   '# Bash One-Liner\n\nAvoids GNU-only flags unless asked. Explains the command.',
-   'MIT',
-   'code,shell,developer',
-   unixepoch(), 445, 4.3, 27),
-
-  ('regex-builder', 'Regex Builder',
-   'lorahub',
-   'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
-   'Builds and explains regexes for PCRE and JS flavors.',
-   '# Regex Builder\n\nReturns the regex, a test against provided samples, and an English gloss.',
-   'Apache-2.0',
-   'regex,code,developer',
-   unixepoch(), 312, 4.2, 22);
-
-INSERT INTO adapter_versions (slug, version, file_key, file_sha256, file_size, eval_scores) VALUES
-  ('sql-generator',    '1.0.0', 'gemma-3-4b-it-4bit/sql-generator/1.0.0/adapter.safetensors',    'PLACEHOLDER_SHA', 18500000, '{"spider_exact_match":0.61,"bird_exact_match":0.48}'),
-  ('email-rewriter',   '1.0.0', 'gemma-3-4b-it-4bit/email-rewriter/1.0.0/adapter.safetensors',   'PLACEHOLDER_SHA', 17200000, '{"tone_accuracy":0.83}'),
-  ('code-reviewer',    '1.0.0', 'gemma-3-4b-it-4bit/code-reviewer/1.0.0/adapter.safetensors',    'PLACEHOLDER_SHA', 19800000, '{"bug_recall":0.52}'),
-  ('json-extractor',   '1.0.0', 'gemma-3-4b-it-4bit/json-extractor/1.0.0/adapter.safetensors',   'PLACEHOLDER_SHA', 16300000, '{"schema_match":0.94}'),
-  ('summarize-long',   '1.0.0', 'gemma-3-4b-it-4bit/summarize-long/1.0.0/adapter.safetensors',   'PLACEHOLDER_SHA', 17900000, '{"rouge_l":0.41}'),
-  ('translate-es-en',  '1.0.0', 'gemma-3-4b-it-4bit/translate-es-en/1.0.0/adapter.safetensors',  'PLACEHOLDER_SHA', 18100000, '{"bleu":37.2}'),
-  ('roleplay-narrator','1.0.0', 'gemma-3-4b-it-4bit/roleplay-narrator/1.0.0/adapter.safetensors','PLACEHOLDER_SHA', 20100000, '{"consistency":0.78}'),
-  ('markdown-pretty',  '1.0.0', 'gemma-3-4b-it-4bit/markdown-pretty/1.0.0/adapter.safetensors',  'PLACEHOLDER_SHA', 15700000, '{"style_conformance":0.91}'),
-  ('bash-oneliner',    '1.0.0', 'gemma-3-4b-it-4bit/bash-oneliner/1.0.0/adapter.safetensors',    'PLACEHOLDER_SHA', 16900000, '{"posix_safe":0.88}'),
-  ('regex-builder',    '1.0.0', 'gemma-3-4b-it-4bit/regex-builder/1.0.0/adapter.safetensors',    'PLACEHOLDER_SHA', 16200000, '{"correctness":0.82}');
+-- Per-version artifact keys (R2 object paths). weights_size is the converted
+-- mlx-format adapters.safetensors, not the original PEFT file.
+INSERT INTO adapter_versions (slug, version, weights_key, weights_sha256, weights_size, config_key, eval_scores, notes) VALUES
+  ('document-writer',  '1.0.0',
+   'gemma-3-4b-it-4bit/document-writer/1.0.0/adapters.safetensors',  '',  59674432,
+   'gemma-3-4b-it-4bit/document-writer/1.0.0/adapter_config.json',
+   NULL,
+   'Rank 8, 7 target modules across 34 layers. Original 98 MB PEFT, 57 MB after conversion.'),
+  ('instruction-tune', '1.0.0',
+   'gemma-3-4b-it-4bit/instruction-tune/1.0.0/adapters.safetensors', '', 238137344,
+   'gemma-3-4b-it-4bit/instruction-tune/1.0.0/adapter_config.json',
+   NULL,
+   'Rank 32. Higher capacity, larger swap cost.'),
+  ('persian',          '1.0.0',
+   'gemma-3-4b-it-4bit/persian/1.0.0/adapters.safetensors',          '', 119070720,
+   'gemma-3-4b-it-4bit/persian/1.0.0/adapter_config.json',
+   NULL,
+   'Rank 16. Visibly different behavior — output flips to Persian.');

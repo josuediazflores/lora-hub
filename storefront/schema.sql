@@ -39,9 +39,11 @@ CREATE TABLE adapters (
 CREATE TABLE adapter_versions (
   slug TEXT NOT NULL REFERENCES adapters(slug),
   version TEXT NOT NULL,                    -- semver-ish, e.g. "1.0.0"
-  file_key TEXT NOT NULL,                   -- R2 object key
-  file_sha256 TEXT NOT NULL,
-  file_size INTEGER NOT NULL,
+  weights_key TEXT NOT NULL,                -- R2 object key for adapters.safetensors
+  weights_sha256 TEXT NOT NULL,
+  weights_size INTEGER NOT NULL,
+  config_key TEXT NOT NULL,                 -- R2 object key for adapter_config.json
+  config_sha256 TEXT,
   eval_scores TEXT,                         -- JSON blob of task-specific scores
   notes TEXT,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),

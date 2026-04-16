@@ -30,11 +30,18 @@ export type StoreAdapter = {
   published_at: number | null;
 };
 
+export type StoreFile = {
+  name: string;
+  path: string; // path relative to STOREFRONT_URL, e.g. "/r2/<key>"
+  size: number | null;
+  sha256: string | null;
+};
+
 export type StoreVersion = {
   version: string;
-  file_sha256: string;
-  file_size: number;
-  download_url: string;
+  weights_size: number;
+  weights_sha256: string | null;
+  files: StoreFile[];
   eval_scores: Record<string, number> | null;
   notes: string | null;
 };
@@ -85,4 +92,18 @@ export async function fetchAdapters(
 
 export async function fetchAdapter(slug: string): Promise<AdapterDetail> {
   return await get<AdapterDetail>(`/adapters/${slug}`);
+}
+
+export function absolutize(path: string): string {
+  return `${STOREFRONT_URL}${path}`;
+}
+
+export async function markInstalled(slug: string): Promise<void> {
+  try {
+    await fetch(`${STOREFRONT_URL}/adapters/${slug}/installed`, {
+      method: "POST",
+    });
+  } catch {
+    // best-effort; client-side install can succeed even if telemetry fails
+  }
 }

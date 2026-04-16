@@ -12,6 +12,3 @@ database_id = "REPLACE_WITH_D1_ID"
 binding = "ADAPTERS"
 bucket_name = "lora-hub-adapters"
 # For local dev, wrangler uses a local file-backed bucket; no prod account needed.
-
-[vars]
-CDN_BASE_URL = "https://adapters.lorahub.local"
