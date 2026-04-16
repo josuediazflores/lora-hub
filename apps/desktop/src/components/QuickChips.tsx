@@ -42,6 +42,7 @@ export function QuickChips({ chips }: { chips: Chip[] }) {
 export function defaultChips({
   baseLoaded,
   adaptersInstalled,
+  bases,
   onLoadBase,
   onOpenStore,
   onLoadLocalAdapter,
@@ -49,20 +50,19 @@ export function defaultChips({
 }: {
   baseLoaded: boolean;
   adaptersInstalled: number;
-  onLoadBase: () => void;
+  bases: { base_id: string; name: string }[];
+  onLoadBase: (baseId: string) => void;
   onOpenStore: () => void;
   onLoadLocalAdapter: () => void;
   onCreateTestAdapters: () => void;
 }): Chip[] {
   if (!baseLoaded) {
-    return [
-      {
-        label: "Load base model",
-        icon: <Download size={14} />,
-        primary: true,
-        onClick: onLoadBase,
-      },
-    ];
+    return bases.map((b, i) => ({
+      label: `Load ${b.name}`,
+      icon: <Download size={14} />,
+      primary: i === 0,
+      onClick: () => onLoadBase(b.base_id),
+    }));
   }
   if (adaptersInstalled === 0) {
     return [

@@ -1,5 +1,7 @@
 import { ChevronDown, Mic, Plus } from "lucide-react";
 
+type BaseOption = { base_id: string; name: string };
+
 type Props = {
   value: string;
   onChange: (v: string) => void;
@@ -7,6 +9,9 @@ type Props = {
   disabled?: boolean;
   placeholder?: string;
   baseLabel: string;
+  baseId?: string | null;
+  bases?: BaseOption[];
+  onPickBase?: (baseId: string) => void;
   adapterLabel?: string | null;
   adapters: { name: string }[];
   onPickAdapter?: (name: string | null) => void;
@@ -20,12 +25,16 @@ export function Composer({
   disabled,
   placeholder,
   baseLabel,
+  baseId,
+  bases = [],
+  onPickBase,
   adapterLabel,
   adapters,
   onPickAdapter,
   large,
 }: Props) {
   const showSelect = adapters.length > 0 && !!onPickAdapter;
+  const showBaseSelect = bases.length > 1 && !!onPickBase;
 
   return (
     <form
@@ -80,13 +89,30 @@ export function Composer({
                 {adapterLabel ?? "no adapter"}
               </span>
             )}
-            <button
-              type="button"
-              className="flex items-center gap-1 rounded-md px-2 py-1 hover:bg-app-surface-hover hover:text-app-text"
-            >
-              {baseLabel}
-              <ChevronDown size={12} />
-            </button>
+            {showBaseSelect ? (
+              <div className="relative flex items-center">
+                <select
+                  className="cursor-pointer appearance-none rounded-md bg-transparent py-1 pl-2 pr-5 text-xs text-app-text-muted hover:text-app-text focus:outline-none"
+                  value={baseId ?? ""}
+                  onChange={(e) => onPickBase?.(e.target.value)}
+                >
+                  {bases.map((b) => (
+                    <option key={b.base_id} value={b.base_id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown
+                  size={12}
+                  className="pointer-events-none absolute right-1.5"
+                />
+              </div>
+            ) : (
+              <span className="flex items-center gap-1 rounded-md px-2 py-1">
+                {baseLabel}
+                <ChevronDown size={12} />
+              </span>
+            )}
             <button
               type="button"
               className="rounded-md p-1.5 hover:bg-app-surface-hover hover:text-app-text"

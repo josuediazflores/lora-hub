@@ -14,7 +14,13 @@ INSERT INTO bases (base_id, name, family, parameters, quant, base_sha, hf_repo, 
    'mlx-community/gemma-3-4b-it-4bit',
    2500000000,
    'Gemma Terms of Use',
-   'Google''s Gemma 3 4B Instruct model, 4-bit quantized for Apple Silicon. LoRA Hub''s launch base.');
+   'Google''s Gemma 3 4B Instruct model, 4-bit quantized for Apple Silicon. LoRA Hub''s launch base.'),
+  ('gemma-4-e4b-it-4bit', 'Gemma 4 E4B Instruct (4-bit)', 'gemma', 'E4B', '4bit',
+   '769bec7273285355f6ba44a974df0e223fa7db7e3267e86b3e032ff006f792bc',
+   'mlx-community/gemma-4-e4b-it-4bit',
+   5220000000,
+   'Gemma Terms of Use',
+   'Google''s Gemma 4 E4B Instruct (April 2026), 4-bit quantized. Multimodal base; LoRA Hub uses the text path. Adapter ecosystem still maturing.');
 
 INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme_md, license, tags, published_at, downloads, rating_avg, rating_count) VALUES
   ('document-writer', 'Document Writer',
@@ -42,7 +48,25 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
    '# Persian Language\n\nLoRA adapter for Persian conversational use. Original PEFT adapter from [mshojaei77/gemma-3-4b-persian-lora-adaptors](https://huggingface.co/mshojaei77/gemma-3-4b-persian-lora-adaptors). Good for visibly demonstrating adapter behavior — output language flips.',
    'Apache-2.0',
    'persian,language,translation',
-   unixepoch(), 18, NULL, 0);
+   unixepoch(), 18, NULL, 0),
+
+  ('emirati-family-chatbot', 'Emirati Family Chatbot',
+   'Aledec',
+   'gemma-4-e4b-it-4bit', '769bec7273285355f6ba44a974df0e223fa7db7e3267e86b3e032ff006f792bc',
+   'Conversational fine-tune in Emirati Arabic dialect, focused on family contexts. Multimodal source LoRA, audio/vision targets stripped on conversion.',
+   '# Emirati Family Chatbot\n\nText-only Arabic conversational adapter on Gemma 4 E4B. Original PEFT adapter from [Aledec/gemma4-emirati-family-chatbot-lora](https://huggingface.co/Aledec/gemma4-emirati-family-chatbot-lora). Audio-tower and vision-tower tensors filtered at conversion time.',
+   'Apache-2.0',
+   'arabic,emirati,conversational',
+   unixepoch(), 0, NULL, 0),
+
+  ('oasst1-instruct', 'OASST1 Instruct',
+   'safibaig03',
+   'gemma-4-e4b-it-4bit', '769bec7273285355f6ba44a974df0e223fa7db7e3267e86b3e032ff006f792bc',
+   'Generic instruction-following polish trained on OASST1, Unsloth-style. Rank 8 — light, fast to swap.',
+   '# OASST1 Instruct\n\nGeneral instruction-tuning on Gemma 4 E4B. Original PEFT adapter from [safibaig03/gemma-4-E4B-oasst1-lora](https://huggingface.co/safibaig03/gemma-4-E4B-oasst1-lora).',
+   'Apache-2.0',
+   'general,instruction,assistant',
+   unixepoch(), 0, NULL, 0);
 
 -- Per-version artifact keys (R2 object paths). weights_size is the converted
 -- mlx-format adapters.safetensors, not the original PEFT file.
@@ -61,4 +85,14 @@ INSERT INTO adapter_versions (slug, version, weights_key, weights_sha256, weight
    'gemma-3-4b-it-4bit/persian/1.0.0/adapters.safetensors',          '', 119070720,
    'gemma-3-4b-it-4bit/persian/1.0.0/adapter_config.json',
    NULL,
-   'Rank 16. Visibly different behavior — output flips to Persian.');
+   'Rank 16. Visibly different behavior — output flips to Persian.'),
+  ('emirati-family-chatbot', '1.0.0',
+   'gemma-4-e4b-it-4bit/emirati-family-chatbot/1.0.0/adapters.safetensors', '', 67076096,
+   'gemma-4-e4b-it-4bit/emirati-family-chatbot/1.0.0/adapter_config.json',
+   NULL,
+   'Rank 16, 42 layers. 296 audio_tower/vision_tower tensors filtered out of original 812-tensor PEFT.'),
+  ('oasst1-instruct', '1.0.0',
+   'gemma-4-e4b-it-4bit/oasst1-instruct/1.0.0/adapters.safetensors', '', 38193152,
+   'gemma-4-e4b-it-4bit/oasst1-instruct/1.0.0/adapter_config.json',
+   NULL,
+   'Rank 8, 42 layers. Unsloth regex correctly scoped to language path; 0 contamination.');

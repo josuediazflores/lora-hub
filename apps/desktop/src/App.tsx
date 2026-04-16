@@ -8,11 +8,24 @@ import { QuickChips, defaultChips } from "./components/QuickChips";
 import { StoreView } from "./components/StoreView";
 import * as sidecar from "./lib/sidecar";
 import * as store from "./lib/store";
-import type { StoreAdapter } from "./lib/store";
+import type { StoreAdapter, StoreBase } from "./lib/store";
 
-const DEFAULT_BASE = "mlx-community/gemma-3-4b-it-4bit";
-const BASE_LABEL = "Gemma 3 4B";
 const USER_NAME = "Josue Diaz Flores";
+
+const FALLBACK_BASES: StoreBase[] = [
+  {
+    base_id: "gemma-3-4b-it-4bit",
+    name: "Gemma 3 4B Instruct (4-bit)",
+    family: "gemma",
+    parameters: "4B",
+    quant: "4bit",
+    base_sha: "3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698",
+    hf_repo: "mlx-community/gemma-3-4b-it-4bit",
+    size_bytes: 2_500_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+];
 
 type Message = {
   id: string;
@@ -40,6 +53,7 @@ type View = "chat" | "store";
 
 function App() {
   const [status, setStatus] = useState<Status | null>(null);
+  const [bases, setBases] = useState<StoreBase[]>(FALLBACK_BASES);
   const [chats, setChats] = useState<Chat[]>([emptyChat()]);
   const [activeChatId, setActiveChatId] = useState<string>(chats[0].id);
   const [input, setInput] = useState("");
@@ -51,6 +65,9 @@ function App() {
   const activeChat = chats.find((c) => c.id === activeChatId)!;
   const messages = activeChat.messages;
   const baseLoaded = !!status?.base_model_id;
+  const activeBase =
+    bases.find((b) => b.hf_repo === status?.base_model_id) ?? null;
+  const baseLabel = activeBase?.name ?? "no base";
   const isWelcome = messages.length === 0;
 
   async function refreshStatus() {
@@ -69,6 +86,12 @@ function App() {
 
   useEffect(() => {
     refreshStatus();
+    store
+      .fetchBases()
+      .then((bs) => bs.length && setBases(bs))
+      .catch(() => {
+        // storefront unreachable — keep fallback so the app still works
+      });
   }, []);
 
   useEffect(() => {
@@ -98,7 +121,7 @@ function App() {
     setActiveChatId(c.id);
   }
 
-  async function handleLoadBase() {
+  async function handleLoadBase(base: StoreBase) {
     setBusy(true);
     const progressId = crypto.randomUUID();
     patchActiveChat((c) => ({
@@ -108,13 +131,13 @@ function App() {
         {
           id: progressId,
           role: "system",
-          text: `Loading ${BASE_LABEL}…`,
+          text: `Loading ${base.name}…`,
           progress: { desc: "preparing", percent: 0, n: 0, total: 0 },
         },
       ],
     }));
 
-    const res = await sidecar.loadBase(DEFAULT_BASE, {
+    const res = await sidecar.loadBase(base.hf_repo, {
       onProgress: (p) => {
         patchActiveChat((c) => ({
           ...c,
@@ -123,8 +146,8 @@ function App() {
               ? {
                   ...m,
                   text: p.total
-                    ? `${BASE_LABEL} — ${p.desc || "downloading"} ${p.n ?? 0}/${p.total} (${p.percent ?? 0}%)`
-                    : `${BASE_LABEL} — ${p.desc || "preparing"}`,
+                    ? `${base.name} — ${p.desc || "downloading"} ${p.n ?? 0}/${p.total} (${p.percent ?? 0}%)`
+                    : `${base.name} — ${p.desc || "preparing"}`,
                   progress: {
                     desc: p.desc ?? "",
                     percent: p.percent ?? 0,
@@ -155,7 +178,7 @@ function App() {
           m.id === progressId
             ? {
                 ...m,
-                text: `${BASE_LABEL} ready (${r.base_sha.slice(0, 8)}…${r.cached ? ", cached" : ""})`,
+                text: `${base.name} ready (${r.base_sha.slice(0, 8)}…${r.cached ? ", cached" : ""})`,
                 progress: null,
               }
             : m,
@@ -429,7 +452,7 @@ function App() {
         {view === "store" ? (
           <StoreView
             baseSha={status?.base_sha ?? null}
-            baseLabel={BASE_LABEL}
+            baseLabel={baseLabel}
             installedSlugs={installedSlugs}
             busy={busy}
             onInstall={handleInstallAdapter}
@@ -441,14 +464,24 @@ function App() {
             onInputChange={setInput}
             onSubmit={handleSend}
             disabled={busy}
-            baseLabel={BASE_LABEL}
+            baseLabel={baseLabel}
+            baseId={activeBase?.base_id ?? null}
+            bases={bases}
+            onPickBase={(id) => {
+              const b = bases.find((x) => x.base_id === id);
+              if (b) handleLoadBase(b);
+            }}
             adapters={status?.adapters ?? []}
             adapter={status?.active_adapter ?? null}
             onPickAdapter={pickAdapter}
             chips={defaultChips({
               baseLoaded,
               adaptersInstalled: status?.adapters.length ?? 0,
-              onLoadBase: handleLoadBase,
+              bases,
+              onLoadBase: (baseId) => {
+                const b = bases.find((x) => x.base_id === baseId);
+                if (b) handleLoadBase(b);
+              },
               onOpenStore: () => setView("store"),
               onLoadLocalAdapter: handleLoadLocalAdapter,
               onCreateTestAdapters: handleCreateTestAdapters,
@@ -462,8 +495,14 @@ function App() {
             onSubmit={handleSend}
             busy={busy}
             scrollRef={scrollRef}
-            baseLabel={BASE_LABEL}
+            baseLabel={baseLabel}
             baseLoaded={baseLoaded}
+            baseId={activeBase?.base_id ?? null}
+            bases={bases}
+            onPickBase={(id) => {
+              const b = bases.find((x) => x.base_id === id);
+              if (b) handleLoadBase(b);
+            }}
             adapters={status?.adapters ?? []}
             adapter={status?.active_adapter ?? null}
             onPickAdapter={pickAdapter}
@@ -483,6 +522,9 @@ function WelcomeScreen({
   adapters,
   adapter,
   onPickAdapter,
+  bases,
+  baseId,
+  onPickBase,
   chips,
 }: {
   input: string;
@@ -493,6 +535,9 @@ function WelcomeScreen({
   adapters: { name: string }[];
   adapter: string | null;
   onPickAdapter: (n: string | null) => void;
+  bases: StoreBase[];
+  baseId: string | null;
+  onPickBase: (baseId: string) => void;
   chips: ReturnType<typeof defaultChips>;
 }) {
   return (
@@ -509,6 +554,9 @@ function WelcomeScreen({
           onSubmit={onSubmit}
           disabled={disabled}
           baseLabel={baseLabel}
+          baseId={baseId}
+          bases={bases}
+          onPickBase={onPickBase}
           adapters={adapters}
           adapterLabel={adapter}
           onPickAdapter={onPickAdapter}
@@ -531,6 +579,9 @@ function ChatView({
   adapters,
   adapter,
   onPickAdapter,
+  bases,
+  baseId,
+  onPickBase,
 }: {
   messages: Message[];
   input: string;
@@ -543,6 +594,9 @@ function ChatView({
   adapters: { name: string }[];
   adapter: string | null;
   onPickAdapter: (n: string | null) => void;
+  bases: StoreBase[];
+  baseId: string | null;
+  onPickBase: (baseId: string) => void;
 }) {
   return (
     <>
@@ -561,6 +615,9 @@ function ChatView({
           disabled={busy || !baseLoaded}
           placeholder={baseLoaded ? "Reply…" : "Load the base model first"}
           baseLabel={baseLabel}
+          baseId={baseId}
+          bases={bases}
+          onPickBase={onPickBase}
           adapters={adapters}
           adapterLabel={adapter}
           onPickAdapter={onPickAdapter}
