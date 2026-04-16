@@ -389,8 +389,14 @@ function App() {
       messages: [...c.messages, userMsg, assistantMsg],
     }));
 
+    const history: sidecar.ChatMessage[] = activeChat.messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .filter((m) => m.text.trim().length > 0)
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.text }));
+
     const res = await sidecar.generate(prompt, {
       adapter: status?.active_adapter ?? undefined,
+      messages: history,
       onToken: (text) => {
         patchActiveChat((c) => ({
           ...c,

@@ -317,6 +317,29 @@ def _swap_to_adapter(name: str | None) -> None:
     STATE.adapters.move_to_end(name)
 
 
+def _format_prompt(prompt: str, messages: list | None) -> str:
+    """Apply the tokenizer's chat template if available. Falls back to the raw
+    prompt for base (non-instruct) models.
+
+    `messages` (optional) is a list of {role, content} for multi-turn history;
+    when omitted, the prompt is treated as a single user message.
+    """
+    tok = STATE.tokenizer
+    apply = getattr(tok, "apply_chat_template", None)
+    if not callable(apply):
+        return prompt
+
+    chat = list(messages) if messages else []
+    if not chat or chat[-1].get("role") != "user":
+        chat.append({"role": "user", "content": prompt})
+
+    try:
+        return apply(chat, add_generation_prompt=True, tokenize=False)
+    except Exception as e:
+        log(f"chat template failed ({e}); using raw prompt")
+        return prompt
+
+
 def op_generate(req: dict) -> dict:
     if STATE.model is None or STATE.tokenizer is None:
         raise SidecarError("BASE_NOT_LOADED", "load a base before generating")
@@ -324,17 +347,31 @@ def op_generate(req: dict) -> dict:
     prompt = req.get("prompt")
     if not isinstance(prompt, str) or not prompt:
         raise SidecarError("INVALID_REQUEST", "generate requires non-empty prompt")
-    max_tokens = int(req.get("max_tokens", 256))
+    max_tokens = int(req.get("max_tokens", 512))
+    temperature = float(req.get("temperature", 0.7))
+    top_p = float(req.get("top_p", 0.95))
+    messages = req.get("messages")
     adapter = req.get("adapter")
 
     if adapter is not None and adapter != STATE.active_adapter:
         _swap_to_adapter(adapter)
 
+    formatted = _format_prompt(prompt, messages)
+
     from mlx_lm import stream_generate
+    from mlx_lm.sample_utils import make_sampler
+
+    sampler = make_sampler(temp=temperature, top_p=top_p)
 
     req_id = req["id"]
     pieces: list[str] = []
-    for chunk in stream_generate(STATE.model, STATE.tokenizer, prompt=prompt, max_tokens=max_tokens):
+    for chunk in stream_generate(
+        STATE.model,
+        STATE.tokenizer,
+        prompt=formatted,
+        max_tokens=max_tokens,
+        sampler=sampler,
+    ):
         text = getattr(chunk, "text", None) or (chunk if isinstance(chunk, str) else "")
         if not text:
             continue

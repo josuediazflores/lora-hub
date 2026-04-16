@@ -71,16 +71,24 @@ export async function loadAdapter(name: string, adapterPath: string) {
   return send({ op: "load_adapter", name, adapter_path: adapterPath });
 }
 
+export type ChatMessage = { role: "user" | "assistant"; content: string };
+
 export async function generate(
   prompt: string,
-  opts: { adapter?: string; maxTokens?: number; onToken?: (text: string) => void } = {},
+  opts: {
+    adapter?: string;
+    maxTokens?: number;
+    messages?: ChatMessage[];
+    onToken?: (text: string) => void;
+  } = {},
 ) {
   return send(
     {
       op: "generate",
       prompt,
       adapter: opts.adapter ?? null,
-      max_tokens: opts.maxTokens ?? 256,
+      max_tokens: opts.maxTokens ?? 512,
+      messages: opts.messages ?? null,
     },
     { onToken: (m) => opts.onToken?.(m.text) },
   );
