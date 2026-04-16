@@ -123,10 +123,15 @@ impl Sidecar {
         mut req: Value,
         channel: Channel<Value>,
     ) -> Result<(), SidecarError> {
-        let id = Uuid::new_v4().to_string();
         let obj = req
             .as_object_mut()
             .ok_or_else(|| SidecarError::Ipc("request must be a JSON object".into()))?;
+        // Honor a caller-provided id (so abort_generation can target it);
+        // otherwise generate one server-side.
+        let id = match obj.get("id").and_then(|v| v.as_str()) {
+            Some(existing) if !existing.is_empty() => existing.to_string(),
+            _ => Uuid::new_v4().to_string(),
+        };
         obj.insert("id".into(), Value::String(id.clone()));
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Value>();

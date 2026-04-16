@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Square } from "lucide-react";
 import { Logo } from "./components/Logo";
+import { Markdown } from "./components/Markdown";
+import {
+  SettingsPanel,
+  loadSettings,
+  saveSettings,
+  type Settings,
+} from "./components/SettingsPanel";
 import { Sidebar, type Conversation } from "./components/Sidebar";
 import { Composer } from "./components/Composer";
 import { QuickChips, defaultChips } from "./components/QuickChips";
@@ -103,6 +110,9 @@ function App() {
     initial.current.activeId || initial.current.chats[0].id,
   );
   const [input, setInput] = useState("");
+  const [settings, setSettings] = useState<Settings>(loadSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [inflightGenId, setInflightGenId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [view, setView] = useState<View>("chat");
@@ -158,6 +168,10 @@ function App() {
       // ignore
     }
   }, [activeChatId]);
+
+  useEffect(() => {
+    saveSettings(settings);
+  }, [settings]);
 
   function patchActiveChat(fn: (c: Chat) => Chat) {
     setChats((prev) => prev.map((c) => (c.id === activeChatId ? fn(c) : c)));
@@ -452,9 +466,12 @@ function App() {
       .filter((m) => m.text.trim().length > 0)
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.text }));
 
-    const res = await sidecar.generate(prompt, {
+    const handle = sidecar.generate(prompt, {
       adapter: status?.active_adapter ?? undefined,
       messages: history,
+      temperature: settings.temperature,
+      topP: settings.topP,
+      maxTokens: settings.maxTokens,
       onToken: (text) => {
         patchActiveChat((c) => ({
           ...c,
@@ -464,6 +481,9 @@ function App() {
         }));
       },
     });
+    setInflightGenId(handle.id);
+    const res = await handle.result;
+    setInflightGenId(null);
 
     patchActiveChat((c) => ({
       ...c,
@@ -472,7 +492,9 @@ function App() {
         if (res.type === "error") {
           return { ...m, text: `[error: ${res.error.message}]`, pending: false };
         }
-        return { ...m, pending: false };
+        const r = res.result as { aborted?: boolean };
+        const suffix = r.aborted ? " ⏹" : "";
+        return { ...m, text: m.text + suffix, pending: false };
       }),
     }));
     setBusy(false);
@@ -519,9 +541,12 @@ function App() {
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.text }));
 
     setBusy(true);
-    const res = await sidecar.generate(userPrompt, {
+    const handle = sidecar.generate(userPrompt, {
       adapter: status?.active_adapter ?? undefined,
       messages: history,
+      temperature: settings.temperature,
+      topP: settings.topP,
+      maxTokens: settings.maxTokens,
       onToken: (text) => {
         patchActiveChat((c) => ({
           ...c,
@@ -531,6 +556,9 @@ function App() {
         }));
       },
     });
+    setInflightGenId(handle.id);
+    const res = await handle.result;
+    setInflightGenId(null);
 
     patchActiveChat((c) => ({
       ...c,
@@ -539,10 +567,17 @@ function App() {
         if (res.type === "error") {
           return { ...m, text: `[error: ${res.error.message}]`, pending: false };
         }
-        return { ...m, pending: false };
+        const r = res.result as { aborted?: boolean };
+        const suffix = r.aborted ? " ⏹" : "";
+        return { ...m, text: m.text + suffix, pending: false };
       }),
     }));
     setBusy(false);
+  }
+
+  async function handleStop() {
+    if (!inflightGenId) return;
+    await sidecar.abortGeneration(inflightGenId);
   }
 
   function pickAdapter(name: string | null) {
@@ -569,6 +604,7 @@ function App() {
           setView("chat");
         }}
         onOpenStore={() => setView("store")}
+        onOpenSettings={() => setSettingsOpen(true)}
         activeView={view}
         userName={USER_NAME}
       />
@@ -638,9 +674,19 @@ function App() {
             adapter={status?.active_adapter ?? null}
             onPickAdapter={pickAdapter}
             onRegenerate={handleRegenerate}
+            onStop={handleStop}
+            canStop={inflightGenId !== null}
           />
         )}
       </main>
+
+      {settingsOpen && (
+        <SettingsPanel
+          settings={settings}
+          onChange={setSettings}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -715,6 +761,8 @@ function ChatView({
   baseId,
   onPickBase,
   onRegenerate,
+  onStop,
+  canStop,
 }: {
   messages: Message[];
   input: string;
@@ -731,10 +779,20 @@ function ChatView({
   baseId: string | null;
   onPickBase: (baseId: string) => void;
   onRegenerate: (assistantId: string) => void;
+  onStop: () => void;
+  canStop: boolean;
 }) {
   const lastAssistantId = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === "assistant" && !messages[i].pending) {
+        return messages[i].id;
+      }
+    }
+    return null;
+  })();
+  const pendingAssistantId = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant" && messages[i].pending) {
         return messages[i].id;
       }
     }
@@ -751,6 +809,8 @@ function ChatView({
               message={m}
               canRegenerate={m.id === lastAssistantId && !busy}
               onRegenerate={() => onRegenerate(m.id)}
+              canStop={m.id === pendingAssistantId && canStop}
+              onStop={onStop}
             />
           ))}
         </div>
@@ -779,10 +839,14 @@ function MessageBubble({
   message,
   canRegenerate,
   onRegenerate,
+  canStop,
+  onStop,
 }: {
   message: Message;
   canRegenerate?: boolean;
   onRegenerate?: () => void;
+  canStop?: boolean;
+  onStop?: () => void;
 }) {
   if (message.role === "system") {
     return (
@@ -807,9 +871,9 @@ function MessageBubble({
   return (
     <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
       <div
-        className={`max-w-[80%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
           isUser
-            ? "bg-app-surface text-app-text"
+            ? "whitespace-pre-wrap bg-app-surface text-app-text"
             : "text-app-text"
         }`}
       >
@@ -818,8 +882,25 @@ function MessageBubble({
             {message.adapter}
           </div>
         )}
-        {message.text || (message.pending ? "…" : "")}
+        {isUser ? (
+          message.text || (message.pending ? "…" : "")
+        ) : message.text ? (
+          <Markdown>{message.text}</Markdown>
+        ) : (
+          message.pending ? "…" : ""
+        )}
       </div>
+      {!isUser && canStop && onStop && (
+        <button
+          type="button"
+          onClick={onStop}
+          className="mt-1 flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-app-text-faint hover:bg-app-surface-hover hover:text-app-text"
+          title="Stop generating"
+        >
+          <Square size={10} className="fill-current" />
+          Stop
+        </button>
+      )}
       {!isUser && canRegenerate && onRegenerate && (
         <button
           type="button"

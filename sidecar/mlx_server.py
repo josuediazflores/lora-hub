@@ -58,6 +58,14 @@ class State:
 STATE = State()
 
 
+# Cooperative cancellation for in-flight generate requests. Only one generation
+# may run at a time; abort_generation flips its event and the loop checks each
+# token. Mutated under GEN_LOCK; main thread reads/writes when handling abort.
+ACTIVE_GENERATION_ID: str | None = None
+ACTIVE_ABORT_EVENT: threading.Event | None = None
+GEN_LOCK = threading.Lock()
+
+
 class SidecarError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -341,6 +349,10 @@ def _format_prompt(prompt: str, messages: list | None) -> str:
 
 
 def op_generate(req: dict) -> dict:
+    """Runs in a worker thread (see handle()). Cooperatively respects
+    ACTIVE_ABORT_EVENT; breaks the token loop on next iteration when set."""
+    global ACTIVE_GENERATION_ID, ACTIVE_ABORT_EVENT
+
     if STATE.model is None or STATE.tokenizer is None:
         raise SidecarError("BASE_NOT_LOADED", "load a base before generating")
 
@@ -353,32 +365,69 @@ def op_generate(req: dict) -> dict:
     messages = req.get("messages")
     adapter = req.get("adapter")
 
-    if adapter is not None and adapter != STATE.active_adapter:
-        _swap_to_adapter(adapter)
+    abort_event = threading.Event()
+    with GEN_LOCK:
+        if ACTIVE_GENERATION_ID is not None:
+            raise SidecarError(
+                "BUSY",
+                f"another generation is in progress ({ACTIVE_GENERATION_ID})",
+            )
+        ACTIVE_GENERATION_ID = req["id"]
+        ACTIVE_ABORT_EVENT = abort_event
 
-    formatted = _format_prompt(prompt, messages)
+    try:
+        if adapter is not None and adapter != STATE.active_adapter:
+            _swap_to_adapter(adapter)
 
-    from mlx_lm import stream_generate
-    from mlx_lm.sample_utils import make_sampler
+        formatted = _format_prompt(prompt, messages)
 
-    sampler = make_sampler(temp=temperature, top_p=top_p)
+        from mlx_lm import stream_generate
+        from mlx_lm.sample_utils import make_sampler
 
-    req_id = req["id"]
-    pieces: list[str] = []
-    for chunk in stream_generate(
-        STATE.model,
-        STATE.tokenizer,
-        prompt=formatted,
-        max_tokens=max_tokens,
-        sampler=sampler,
-    ):
-        text = getattr(chunk, "text", None) or (chunk if isinstance(chunk, str) else "")
-        if not text:
-            continue
-        pieces.append(text)
-        emit({"id": req_id, "type": "token", "text": text})
+        sampler = make_sampler(temp=temperature, top_p=top_p)
 
-    return {"text": "".join(pieces), "adapter": STATE.active_adapter}
+        req_id = req["id"]
+        pieces: list[str] = []
+        aborted = False
+        for chunk in stream_generate(
+            STATE.model,
+            STATE.tokenizer,
+            prompt=formatted,
+            max_tokens=max_tokens,
+            sampler=sampler,
+        ):
+            if abort_event.is_set():
+                aborted = True
+                break
+            text = getattr(chunk, "text", None) or (chunk if isinstance(chunk, str) else "")
+            if not text:
+                continue
+            pieces.append(text)
+            emit({"id": req_id, "type": "token", "text": text})
+
+        return {
+            "text": "".join(pieces),
+            "adapter": STATE.active_adapter,
+            "aborted": aborted,
+        }
+    finally:
+        with GEN_LOCK:
+            ACTIVE_GENERATION_ID = None
+            ACTIVE_ABORT_EVENT = None
+
+
+def op_abort_generation(req: dict) -> dict:
+    target = req.get("target_id")
+    with GEN_LOCK:
+        if not ACTIVE_GENERATION_ID or not ACTIVE_ABORT_EVENT:
+            return {"aborted": False, "reason": "no active generation"}
+        if target and target != ACTIVE_GENERATION_ID:
+            return {
+                "aborted": False,
+                "reason": f"active generation is {ACTIVE_GENERATION_ID}, not {target}",
+            }
+        ACTIVE_ABORT_EVENT.set()
+        return {"aborted": True, "target_id": ACTIVE_GENERATION_ID}
 
 
 def op_status(_req: dict) -> dict:
@@ -454,13 +503,18 @@ HANDLERS = {
     "load_adapter": op_load_adapter,
     "unload_adapter": op_unload_adapter,
     "generate": op_generate,
+    "abort_generation": op_abort_generation,
     "status": op_status,
     "base_fingerprint": op_base_fingerprint,
     "make_test_adapter": op_make_test_adapter,
 }
 
+# These ops run in a worker thread so the main loop can keep reading stdin
+# (notably so abort_generation can interrupt a running generate).
+ASYNC_OPS = {"generate"}
 
-def handle(req: dict) -> None:
+
+def _run_handler(req: dict) -> None:
     req_id = req.get("id")
     op = req.get("op")
     try:
@@ -468,14 +522,27 @@ def handle(req: dict) -> None:
             raise SidecarError("INVALID_REQUEST", "missing id")
         if op not in HANDLERS:
             raise SidecarError("UNKNOWN_OP", f"unknown op {op!r}")
-        with STATE.lock:
+        # ASYNC_OPS bypass STATE.lock — they manage their own concurrency
+        # (currently only generate, which is gated by GEN_LOCK to one in-flight).
+        if op in ASYNC_OPS:
             result = HANDLERS[op](req)
+        else:
+            with STATE.lock:
+                result = HANDLERS[op](req)
         emit({"id": req_id, "type": "done", "result": result})
     except SidecarError as e:
         emit({"id": req_id, "type": "error", "error": {"code": e.code, "message": e.message}})
     except Exception as e:
         log(f"unhandled exception:\n{traceback.format_exc()}")
         emit({"id": req_id, "type": "error", "error": {"code": "INTERNAL", "message": str(e)}})
+
+
+def handle(req: dict) -> None:
+    op = req.get("op")
+    if op in ASYNC_OPS:
+        threading.Thread(target=_run_handler, args=(req,), daemon=True).start()
+    else:
+        _run_handler(req)
 
 
 def main() -> int:

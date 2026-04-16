@@ -1,5 +1,11 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 
+let _seq = 0;
+function nextId(): string {
+  _seq += 1;
+  return `${Date.now().toString(36)}-${_seq.toString(36)}`;
+}
+
 export type SidecarToken = { id: string; type: "token"; text: string };
 export type SidecarProgress = {
   id: string;
@@ -73,25 +79,41 @@ export async function loadAdapter(name: string, adapterPath: string) {
 
 export type ChatMessage = { role: "user" | "assistant"; content: string };
 
-export async function generate(
+export type GenerateHandle = {
+  id: string;
+  result: Promise<SidecarDone | SidecarError>;
+};
+
+export function generate(
   prompt: string,
   opts: {
     adapter?: string;
     maxTokens?: number;
+    temperature?: number;
+    topP?: number;
     messages?: ChatMessage[];
     onToken?: (text: string) => void;
   } = {},
-) {
-  return send(
+): GenerateHandle {
+  const id = nextId();
+  const result = send(
     {
+      id,
       op: "generate",
       prompt,
       adapter: opts.adapter ?? null,
       max_tokens: opts.maxTokens ?? 512,
+      temperature: opts.temperature ?? 0.7,
+      top_p: opts.topP ?? 0.95,
       messages: opts.messages ?? null,
     },
     { onToken: (m) => opts.onToken?.(m.text) },
   );
+  return { id, result };
+}
+
+export async function abortGeneration(targetId: string) {
+  return send({ op: "abort_generation", target_id: targetId });
 }
 
 export async function makeTestAdapter(outDir: string, seed: number) {

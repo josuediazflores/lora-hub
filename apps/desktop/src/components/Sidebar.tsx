@@ -24,6 +24,7 @@ type Props = {
   onSelect: (id: string) => void;
   onNewChat: () => void;
   onOpenStore: () => void;
+  onOpenSettings: () => void;
   userName: string;
 };
 
@@ -34,6 +35,7 @@ export function Sidebar({
   onSelect,
   onNewChat,
   onOpenStore,
+  onOpenSettings,
   userName,
 }: Props) {
   return (
@@ -105,12 +107,13 @@ export function Sidebar({
       </div>
 
       <div className="border-t border-app-border px-3 py-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-app-text-muted">
-            <Settings size={14} />
-            <span className="truncate">{userName}</span>
-          </div>
-        </div>
+        <button
+          onClick={onOpenSettings}
+          className="flex w-full items-center justify-between rounded-md px-1 py-1 text-app-text-muted hover:bg-app-surface-hover hover:text-app-text"
+        >
+          <span className="truncate">{userName}</span>
+          <Settings size={14} />
+        </button>
       </div>
     </aside>
   );
