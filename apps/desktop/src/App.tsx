@@ -10,10 +10,12 @@ import {
   saveSettings,
   type Settings,
 } from "./components/SettingsPanel";
-import { Sidebar, type Conversation } from "./components/Sidebar";
+import { Sidebar, type Conversation, type SidebarView } from "./components/Sidebar";
 import { Composer } from "./components/Composer";
 import { QuickChips, defaultChips } from "./components/QuickChips";
 import { StoreView } from "./components/StoreView";
+import { ModelsView } from "./components/ModelsView";
+import { AdaptersView } from "./components/AdaptersView";
 import * as sidecar from "./lib/sidecar";
 import * as store from "./lib/store";
 import type { StoreAdapter, StoreBase } from "./lib/store";
@@ -55,14 +57,15 @@ type Chat = {
   id: string;
   title: string;
   messages: Message[];
+  pinned?: boolean;
 };
 
-type View = "chat" | "store";
+type View = SidebarView;
 
 const STORAGE_KEY = "lora-hub:chats:v1";
 const ACTIVE_KEY = "lora-hub:active-chat:v1";
 
-type PersistedChat = { id: string; title: string; messages: Message[] };
+type PersistedChat = { id: string; title: string; messages: Message[]; pinned?: boolean };
 
 function loadPersistedChats(): { chats: Chat[]; activeId: string } {
   try {
@@ -75,6 +78,7 @@ function loadPersistedChats(): { chats: Chat[]; activeId: string } {
     const chats: Chat[] = parsed.map((c) => ({
       id: c.id,
       title: c.title,
+      pinned: !!c.pinned,
       messages: (c.messages ?? []).map((m) => ({
         ...m,
         progress: null,
@@ -93,6 +97,7 @@ function persistChats(chats: Chat[]): void {
     const cleaned: PersistedChat[] = chats.map((c) => ({
       id: c.id,
       title: c.title,
+      pinned: c.pinned,
       messages: c.messages.map((m) => ({ ...m, progress: null, pending: false })),
     }));
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
@@ -113,6 +118,24 @@ function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [inflightGenId, setInflightGenId] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("lora-hub:sidebar-collapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "lora-hub:sidebar-collapsed",
+        sidebarCollapsed ? "1" : "0",
+      );
+    } catch {
+      // ignore
+    }
+  }, [sidebarCollapsed]);
   const [busy, setBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [view, setView] = useState<View>("chat");
@@ -191,7 +214,39 @@ function App() {
     const c = emptyChat();
     setChats((prev) => [c, ...prev]);
     setActiveChatId(c.id);
+    setView("chat");
   }
+
+  function togglePin(id: string) {
+    setChats((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, pinned: !c.pinned } : c)),
+    );
+  }
+
+  async function handleUnloadAdapter(name: string) {
+    const res = await sidecar.unloadAdapter(name);
+    if (res.type === "error") {
+      pushSystem(`Unload failed: ${res.error.message}`);
+      return;
+    }
+    await refreshStatus();
+    setStatus((s) =>
+      s && s.active_adapter === name ? { ...s, active_adapter: null } : s,
+    );
+  }
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const isMac = navigator.platform.toLowerCase().includes("mac");
+      const meta = isMac ? e.metaKey : e.ctrlKey;
+      if (meta && e.key.toLowerCase() === "n" && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        newChat();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   async function handleLoadBase(base: StoreBase) {
     setBusy(true);
@@ -586,7 +641,7 @@ function App() {
 
   const sidebarConversations: Conversation[] = chats
     .filter((c) => c.messages.length > 0)
-    .map((c) => ({ id: c.id, title: c.title }));
+    .map((c) => ({ id: c.id, title: c.title, pinned: !!c.pinned }));
 
   const installedSlugs = new Set(status?.adapters.map((a) => a.name) ?? []);
 
@@ -595,17 +650,19 @@ function App() {
       <Sidebar
         conversations={sidebarConversations}
         activeId={activeChatId}
+        activeView={view}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         onSelect={(id) => {
           setActiveChatId(id);
           setView("chat");
         }}
-        onNewChat={() => {
-          newChat();
-          setView("chat");
-        }}
+        onNewChat={newChat}
         onOpenStore={() => setView("store")}
+        onOpenModels={() => setView("models")}
+        onOpenAdapters={() => setView("adapters")}
         onOpenSettings={() => setSettingsOpen(true)}
-        activeView={view}
+        onTogglePin={togglePin}
         userName={USER_NAME}
       />
 
@@ -616,7 +673,25 @@ function App() {
           </div>
         )}
 
-        {view === "store" ? (
+        {view === "models" ? (
+          <ModelsView
+            bases={bases}
+            activeBaseId={activeBase?.base_id ?? null}
+            busy={busy}
+            onLoad={handleLoadBase}
+            onBack={() => setView("chat")}
+          />
+        ) : view === "adapters" ? (
+          <AdaptersView
+            adapters={status?.adapters ?? []}
+            activeAdapter={status?.active_adapter ?? null}
+            busy={busy}
+            onUnload={handleUnloadAdapter}
+            onPickActive={pickAdapter}
+            onOpenStore={() => setView("store")}
+            onBack={() => setView("chat")}
+          />
+        ) : view === "store" ? (
           <StoreView
             baseSha={status?.base_sha ?? null}
             baseLabel={baseLabel}
