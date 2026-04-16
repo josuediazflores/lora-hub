@@ -15,6 +15,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from peft_convert import (
+    PeftConvertError,
+    convert_peft_adapter,
+    is_mlx_adapter,
+    is_peft_adapter,
+)
+
 
 def log(msg: str) -> None:
     print(f"[sidecar] {msg}", file=sys.stderr, flush=True)
@@ -162,29 +169,77 @@ def op_load_base(req: dict) -> dict:
     return {"model_id": model_id, "base_sha": base_sha, "cached": False}
 
 
-def _ensure_wrapped(lora_params: dict, num_layers: int) -> None:
-    """Wrap lora layers exactly once per process. Subsequent adapters must use the
-    same lora_parameters/num_layers (a.k.a. shape-compatible adapters)."""
+def _wrap_now(lora_params: dict, num_layers: int) -> None:
     from mlx_lm.tuner.utils import linear_to_lora_layers
-
-    if STATE.lora_wrapped:
-        if STATE.wrapped_lora_params != lora_params or STATE.wrapped_num_layers != num_layers:
-            raise SidecarError(
-                "BASE_MISMATCH",
-                "adapter lora_parameters/num_layers differ from already-wrapped config",
-            )
-        return
 
     linear_to_lora_layers(STATE.model, num_layers, lora_params)
     STATE.lora_wrapped = True
-    STATE.wrapped_lora_params = lora_params
+    STATE.wrapped_lora_params = dict(lora_params)
     STATE.wrapped_num_layers = num_layers
+
+
+def _ensure_wrapped(lora_params: dict, num_layers: int) -> None:
+    """Ensure the model is wrapped with the given lora config. If already wrapped
+    with a different config, reload the base and re-wrap (drops cached adapter
+    weights from the model — paths in STATE.adapters remain so callers can re-load).
+    """
+    if STATE.lora_wrapped:
+        if (
+            STATE.wrapped_lora_params == lora_params
+            and STATE.wrapped_num_layers == num_layers
+        ):
+            return
+        # Re-wrap path: blow away the model and rebuild.
+        log("re-wrapping base for new lora config")
+        from mlx_lm import load as mlx_load
+
+        model_id = STATE.base_model_id
+        if not model_id:
+            raise SidecarError("BASE_NOT_LOADED", "no base to re-wrap")
+        model, tokenizer = mlx_load(model_id)
+        STATE.model = model
+        STATE.tokenizer = tokenizer
+        STATE.lora_wrapped = False
+        STATE.wrapped_lora_params = None
+        STATE.wrapped_num_layers = None
+        STATE.active_adapter = None
+
+    _wrap_now(lora_params, num_layers)
 
 
 def _evict_if_needed() -> None:
     while len(STATE.adapters) > STATE.cache_capacity:
         evicted_name, _ = STATE.adapters.popitem(last=False)
         log(f"evicted adapter {evicted_name}")
+
+
+def _maybe_convert_peft(src: Path) -> Path:
+    """If src is a PEFT adapter dir, convert it to mlx-lm format under
+    src/.mlx-cache/ and return that path. Otherwise return src unchanged.
+    Conversion result is cached and skipped on subsequent loads.
+    """
+    if is_mlx_adapter(src):
+        return src
+    if not is_peft_adapter(src):
+        return src
+
+    cache_dir = src / ".mlx-cache"
+    if is_mlx_adapter(cache_dir):
+        log(f"using cached mlx conversion at {cache_dir}")
+        return cache_dir
+
+    log(f"auto-converting PEFT adapter {src} → {cache_dir}")
+    try:
+        report = convert_peft_adapter(
+            src,
+            cache_dir,
+            base_sha=STATE.base_sha,
+            base_model_id=STATE.base_model_id,
+        )
+        log(f"conversion done: {report['converted_tensors']} tensors, {report['num_layers']} layers")
+    except PeftConvertError as e:
+        raise SidecarError("INVALID_REQUEST", f"PEFT conversion failed: {e}")
+    return cache_dir
 
 
 def op_load_adapter(req: dict) -> dict:
@@ -196,7 +251,11 @@ def op_load_adapter(req: dict) -> dict:
     if not name or not adapter_path:
         raise SidecarError("INVALID_REQUEST", "load_adapter requires name + adapter_path")
 
-    p = Path(adapter_path)
+    src = Path(adapter_path)
+    if not src.exists():
+        raise SidecarError("INVALID_REQUEST", f"adapter path does not exist: {src}")
+
+    p = _maybe_convert_peft(src)
     cfg_path = p / "adapter_config.json"
     if not cfg_path.exists():
         raise SidecarError("INVALID_REQUEST", f"missing adapter_config.json at {p}")
@@ -234,10 +293,8 @@ def op_unload_adapter(req: dict) -> dict:
 
 
 def _swap_to_adapter(name: str | None) -> None:
-    """Swap the model to point at the named adapter's weights, or strip back to base.
-
-    Stripping back to base means loading a 'zero adapter' — but we don't currently
-    support that cleanly; if name is None we just leave whatever was last loaded.
+    """Swap the model to point at the named adapter's weights. If the adapter's
+    lora config differs from the currently-wrapped one, re-wraps the base first.
     """
     import mlx.core as mx
 
@@ -249,6 +306,11 @@ def _swap_to_adapter(name: str | None) -> None:
     weights_path = entry.path / "adapters.safetensors"
     if not weights_path.exists():
         raise SidecarError("INTERNAL", f"missing adapters.safetensors at {entry.path}")
+
+    lora_params = entry.config.get("lora_parameters") or {}
+    num_layers = entry.config.get("num_layers", 0)
+    _ensure_wrapped(lora_params, num_layers)
+
     STATE.model.load_weights(str(weights_path), strict=False)
     mx.eval(STATE.model.parameters())
     STATE.active_adapter = name
