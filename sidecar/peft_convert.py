@@ -23,6 +23,37 @@ PEFT_NAME = re.compile(
     r"^base_model\.model\.(?P<path>.+?)\.lora_(?P<which>[AB])\.weight$"
 )
 
+# Multimodal contamination — these substrings indicate non-text-side modules
+# that mlx-lm's text-LoRA pipeline can't apply. Adapters targeting these
+# (audio encoder, vision tower, projection bridges) are silently dropped.
+NON_TEXT_MARKERS = (
+    "audio_tower",
+    "vision_tower",
+    "image_proj",
+    "embedding_projection",
+    "per_layer_",
+    "relative_",
+    "input_proj",
+    "output_proj",
+    "embed_audio",
+    "embed_vision",
+)
+
+
+def _normalize_text_path(path: str) -> str:
+    """Map PEFT's text-side path to the mlx-lm convention.
+
+    Gemma 3 / Llama-style:  PEFT path == mlx-lm path (no rewrite needed)
+        e.g. language_model.model.layers.N.self_attn.q_proj
+    Gemma 4 multimodal: PEFT writes `model.language_model.layers.N`, but mlx-lm
+        registers the inner module as `language_model.model.layers.N`. Swap the
+        order so the names match.
+    """
+    if path.startswith("model.language_model.layers."):
+        # `model.language_model.layers.N.X` -> `language_model.model.layers.N.X`
+        return "language_model.model." + path[len("model.language_model.") :]
+    return path
+
 
 class PeftConvertError(Exception):
     pass
@@ -78,25 +109,32 @@ def convert_peft_adapter(
     converted: dict[str, mx.array] = {}
     keys_seen: set[str] = set()
     layer_indices: set[int] = set()
-    skipped: list[str] = []
+    skipped_unmatched: list[str] = []
+    skipped_non_text: list[str] = []
 
     with safetensors.safe_open(str(weights_path), framework="numpy") as sf:
         for name in sf.keys():
             m = PEFT_NAME.match(name)
             if not m:
-                skipped.append(name)
+                skipped_unmatched.append(name)
                 continue
             path = m["path"]
             which = m["which"].lower()
 
+            if any(marker in path for marker in NON_TEXT_MARKERS):
+                skipped_non_text.append(name)
+                continue
+
+            mlx_path = _normalize_text_path(path)
+
             tensor = sf.get_tensor(name).astype(np.float32)
             arr = mx.array(tensor.T)
-            converted[f"{path}.lora_{which}"] = arr
+            converted[f"{mlx_path}.lora_{which}"] = arr
 
-            layer_match = re.search(r"\.layers\.(\d+)\.", path)
+            layer_match = re.search(r"\.layers\.(\d+)\.", mlx_path)
             if layer_match:
                 layer_indices.add(int(layer_match.group(1)))
-            module_match = re.search(r"\.layers\.\d+\.(.+)$", path)
+            module_match = re.search(r"\.layers\.\d+\.(.+)$", mlx_path)
             if module_match:
                 keys_seen.add(module_match.group(1))
 
@@ -131,7 +169,8 @@ def convert_peft_adapter(
 
     return {
         "converted_tensors": len(converted),
-        "skipped_tensors": len(skipped),
+        "skipped_unmatched": len(skipped_unmatched),
+        "skipped_non_text": len(skipped_non_text),
         "num_layers": num_layers,
         "keys": sorted(keys_seen),
         "rank": rank,
