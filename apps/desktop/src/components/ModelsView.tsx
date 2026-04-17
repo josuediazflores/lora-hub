@@ -1,5 +1,7 @@
+import { useEffect, useState } from "react";
 import { ArrowLeft, Check, Download } from "lucide-react";
 import type { StoreBase } from "../lib/store";
+import { memoryFit, systemMemoryBytes, type MemoryFit } from "../lib/system";
 
 type Props = {
   bases: StoreBase[];
@@ -10,6 +12,10 @@ type Props = {
 };
 
 export function ModelsView({ bases, activeBaseId, busy, onLoad, onBack }: Props) {
+  const [totalMem, setTotalMem] = useState<number>(0);
+  useEffect(() => {
+    systemMemoryBytes().then(setTotalMem).catch(() => setTotalMem(0));
+  }, []);
   return (
     <div className="flex flex-1 flex-col">
       <header className="border-b border-app-border px-6 py-4">
@@ -31,6 +37,7 @@ export function ModelsView({ bases, activeBaseId, busy, onLoad, onBack }: Props)
         <div className="mx-auto flex max-w-3xl flex-col gap-3">
           {bases.map((b) => {
             const active = b.base_id === activeBaseId;
+            const fit = memoryFit(b.size_bytes, totalMem);
             return (
               <article
                 key={b.base_id}
@@ -38,7 +45,10 @@ export function ModelsView({ bases, activeBaseId, busy, onLoad, onBack }: Props)
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
-                    <h3 className="font-medium text-app-text">{b.name}</h3>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-medium text-app-text">{b.name}</h3>
+                      <FitBadge fit={fit} />
+                    </div>
                     <div className="mt-0.5 text-xs text-app-text-faint">
                       {b.family} · {b.parameters} · {b.quant} ·{" "}
                       {formatBytes(b.size_bytes)} · {b.license}
@@ -91,4 +101,18 @@ function formatBytes(n: number): string {
   if (n >= 1e6) return `${(n / 1e6).toFixed(0)} MB`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;
   return `${n} B`;
+}
+
+function FitBadge({ fit }: { fit: MemoryFit }) {
+  if (fit === "unknown") return null;
+  const copy = {
+    fits: { label: "Fits your Mac", cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" },
+    tight: { label: "Tight on RAM", cls: "border-amber-500/30 bg-amber-500/10 text-amber-300" },
+    oom: { label: "Won't fit", cls: "border-red-500/30 bg-red-500/10 text-red-300" },
+  }[fit];
+  return (
+    <span className={`rounded-full border px-2 py-0.5 text-[10px] ${copy.cls}`}>
+      {copy.label}
+    </span>
+  );
 }
