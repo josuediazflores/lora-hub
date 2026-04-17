@@ -1,6 +1,10 @@
+mod permissions;
 mod sidecar;
+mod tools;
+mod workspace;
 
 use futures_util::StreamExt;
+use permissions::{Preset, PresetState};
 use serde::{Deserialize, Serialize};
 use sidecar::Sidecar;
 use std::path::PathBuf;
@@ -8,6 +12,7 @@ use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 use tokio::io::AsyncWriteExt;
+use workspace::{Workspace, WorkspaceState};
 
 #[tauri::command]
 fn app_adapters_dir(app: AppHandle) -> Result<String, String> {
@@ -18,6 +23,76 @@ fn app_adapters_dir(app: AppHandle) -> Result<String, String> {
         .join("adapters");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn set_workspace(
+    app: AppHandle,
+    state: tauri::State<'_, WorkspaceState>,
+    root: Option<String>,
+) -> Result<Option<Workspace>, String> {
+    let new_ws = match root {
+        Some(r) => {
+            let path = PathBuf::from(&r);
+            if !path.exists() {
+                return Err(format!("workspace path does not exist: {r}"));
+            }
+            if !path.is_dir() {
+                return Err(format!("workspace path is not a directory: {r}"));
+            }
+            Some(Workspace { root: path })
+        }
+        None => None,
+    };
+    {
+        let mut guard = state.0.lock().unwrap();
+        *guard = new_ws.clone();
+    }
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    workspace::save(&data_dir, &new_ws)?;
+    Ok(new_ws)
+}
+
+#[tauri::command]
+fn get_workspace(state: tauri::State<'_, WorkspaceState>) -> Option<Workspace> {
+    state.0.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn set_preset(
+    app: AppHandle,
+    state: tauri::State<'_, PresetState>,
+    preset: Preset,
+) -> Result<Preset, String> {
+    {
+        let mut guard = state.0.lock().unwrap();
+        *guard = preset;
+    }
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    permissions::save(&data_dir, preset)?;
+    Ok(preset)
+}
+
+#[tauri::command]
+fn get_preset(state: tauri::State<'_, PresetState>) -> Preset {
+    *state.0.lock().unwrap()
+}
+
+#[tauri::command]
+fn system_memory_bytes() -> Result<u64, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        let s = String::from_utf8(out.stdout).map_err(|e| e.to_string())?;
+        s.trim().parse::<u64>().map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(0)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +184,19 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // Load persisted workspace + permissions preset. Failures are
+            // non-fatal — we just start with no workspace and ReadOnly preset.
+            let data_dir = handle
+                .path()
+                .app_data_dir()
+                .ok()
+                .unwrap_or_else(|| PathBuf::from("."));
+            let ws = workspace::load(&data_dir);
+            let preset = permissions::load(&data_dir);
+            handle.manage(WorkspaceState::new(ws));
+            handle.manage(PresetState::new(preset));
+
             tauri::async_runtime::block_on(async move {
                 match Sidecar::spawn(&handle).await {
                     Ok(sc) => {
@@ -124,7 +212,19 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             sidecar::sidecar_send,
             app_adapters_dir,
-            download_adapter
+            download_adapter,
+            system_memory_bytes,
+            set_workspace,
+            get_workspace,
+            set_preset,
+            get_preset,
+            tools::tool_read_file,
+            tools::tool_write_file,
+            tools::tool_list_dir,
+            tools::tool_glob,
+            tools::tool_grep,
+            tools::tool_run_command,
+            tools::tool_http_fetch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

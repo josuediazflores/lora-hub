@@ -16,8 +16,25 @@ import { QuickChips, defaultChips } from "./components/QuickChips";
 import { StoreView } from "./components/StoreView";
 import { ModelsView } from "./components/ModelsView";
 import { AdaptersView } from "./components/AdaptersView";
+import { ConfirmModal } from "./components/ConfirmModal";
+import { Gemma4Tile } from "./components/Gemma4Tile";
+import { FeaturedAdapters } from "./components/FeaturedAdapters";
+import { ActiveAdapterStrip } from "./components/ActiveAdapterStrip";
+import { WorkspaceFooter } from "./components/WorkspaceFooter";
+import { ToolCallBubble, type ToolCallMessage } from "./components/ToolCallBubble";
+import { adapterAccent } from "./lib/adapter-accent";
+import {
+  getPreset,
+  getWorkspace,
+  setPreset,
+  setWorkspace as saveWorkspaceRoot,
+  workspaceWarning,
+  type Preset,
+  type Workspace,
+} from "./lib/workspace";
 import * as sidecar from "./lib/sidecar";
 import * as store from "./lib/store";
+import { TOOL_DEFS, runTool } from "./lib/tools";
 import type { StoreAdapter, StoreBase } from "./lib/store";
 
 const USER_NAME = "Josue Diaz Flores";
@@ -35,6 +52,18 @@ const FALLBACK_BASES: StoreBase[] = [
     license: "Gemma Terms",
     description: "",
   },
+  {
+    base_id: "gemma-4-e4b-it-4bit",
+    name: "Gemma 4 E4B Instruct (4-bit)",
+    family: "gemma",
+    parameters: "E4B",
+    quant: "4bit",
+    base_sha: "769bec7273285355f6ba44a974df0e223fa7db7e3267e86b3e032ff006f792bc",
+    hf_repo: "mlx-community/gemma-4-e4b-it-4bit",
+    size_bytes: 5_220_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
 ];
 
 type Message = {
@@ -46,6 +75,19 @@ type Message = {
   progress?: { desc: string; percent: number; n: number; total: number } | null;
 };
 
+type ComparisonMessage = {
+  id: string;
+  role: "comparison";
+  prompt: string;
+  adapter: string;
+  baseText: string;
+  adapterText: string;
+  /** Which half is currently streaming, or null once both are done. */
+  pending: "base" | "adapter" | null;
+};
+
+type AnyMessage = Message | ComparisonMessage | ToolCallMessage;
+
 type Status = {
   base_model_id: string | null;
   base_sha: string | null;
@@ -56,7 +98,7 @@ type Status = {
 type Chat = {
   id: string;
   title: string;
-  messages: Message[];
+  messages: AnyMessage[];
   pinned?: boolean;
 };
 
@@ -65,7 +107,7 @@ type View = SidebarView;
 const STORAGE_KEY = "lora-hub:chats:v1";
 const ACTIVE_KEY = "lora-hub:active-chat:v1";
 
-type PersistedChat = { id: string; title: string; messages: Message[]; pinned?: boolean };
+type PersistedChat = { id: string; title: string; messages: AnyMessage[]; pinned?: boolean };
 
 function loadPersistedChats(): { chats: Chat[]; activeId: string } {
   try {
@@ -79,11 +121,7 @@ function loadPersistedChats(): { chats: Chat[]; activeId: string } {
       id: c.id,
       title: c.title,
       pinned: !!c.pinned,
-      messages: (c.messages ?? []).map((m) => ({
-        ...m,
-        progress: null,
-        pending: false,
-      })),
+      messages: (c.messages ?? []).map((m) => cleanOnLoad(m)),
     }));
     const activeId = localStorage.getItem(ACTIVE_KEY) ?? chats[0].id;
     return { chats, activeId: chats.some((c) => c.id === activeId) ? activeId : chats[0].id };
@@ -98,12 +136,70 @@ function persistChats(chats: Chat[]): void {
       id: c.id,
       title: c.title,
       pinned: c.pinned,
-      messages: c.messages.map((m) => ({ ...m, progress: null, pending: false })),
+      messages: c.messages.map((m) => cleanOnLoad(m)),
     }));
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
   } catch {
     // ignore quota errors etc.
   }
+}
+
+/** Strip transient fields on (re)load/persist without clobbering the
+ * discriminated-union shape for comparison / tool_call messages. */
+function cleanOnLoad(m: AnyMessage): AnyMessage {
+  if (m.role === "comparison") {
+    return { ...m, pending: null };
+  }
+  if (m.role === "tool_call") {
+    // Trim big outputs on persist so localStorage doesn't balloon.
+    const MAX = 2000;
+    const output =
+      m.output && m.output.length > MAX
+        ? m.output.slice(0, MAX) + "\n…truncated for persistence…"
+        : m.output;
+    // A pending tool call from a prior session is dead — mark it denied so
+    // the transcript makes sense after reload.
+    const status = m.status === "pending" ? "denied" : m.status;
+    return { ...m, output, status };
+  }
+  return { ...m, progress: null, pending: false };
+}
+
+/** Fold chat history into sidecar-ready turns. Comparison messages collapse
+ * to their adapter output. Tool-call messages expand into a synthetic
+ * assistant turn carrying the call marker followed by a synthetic user turn
+ * carrying the tool result, so the model sees prior tool interactions on any
+ * follow-up generate. */
+function buildHistory(msgs: AnyMessage[]): sidecar.ChatMessage[] {
+  const out: sidecar.ChatMessage[] = [];
+  for (const m of msgs) {
+    if (m.role === "comparison") {
+      const content = m.adapterText.trim();
+      if (content) out.push({ role: "assistant", content });
+    } else if (m.role === "tool_call") {
+      out.push({
+        role: "assistant",
+        content: `<tool_call>${JSON.stringify({
+          name: m.name,
+          args: m.args,
+        })}</tool_call>`,
+      });
+      const resultText =
+        m.status === "success"
+          ? (m.output ?? "")
+          : (m.error ?? `[${m.status}]`);
+      out.push({
+        role: "user",
+        content: `[tool result: ${m.name}${
+          m.status !== "success" ? " " + m.status : ""
+        }]\n${resultText}`,
+      });
+    } else if (m.role === "user" || m.role === "assistant") {
+      const content = m.text.trim();
+      if (content) out.push({ role: m.role, content });
+    }
+  }
+  return out;
 }
 
 function App() {
@@ -139,6 +235,11 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [view, setView] = useState<View>("chat");
+  const [pendingBase, setPendingBase] = useState<StoreBase | null>(null);
+  const [compareMode, setCompareMode] = useState<boolean>(false);
+  const [computerUseMode, setComputerUseMode] = useState<boolean>(false);
+  const [permissionPreset, setPermissionPresetState] = useState<Preset>("read_only");
+  const [workspace, setWorkspaceState] = useState<Workspace | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const activeChat = chats.find((c) => c.id === activeChatId)!;
@@ -171,6 +272,8 @@ function App() {
       .catch(() => {
         // storefront unreachable — keep fallback so the app still works
       });
+    getPreset().then(setPermissionPresetState).catch(() => {});
+    getWorkspace().then(setWorkspaceState).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -195,6 +298,52 @@ function App() {
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  useEffect(() => {
+    if (!status?.active_adapter && compareMode) setCompareMode(false);
+  }, [status?.active_adapter, compareMode]);
+
+  function toggleComputerUse() {
+    setComputerUseMode((v) => {
+      const next = !v;
+      if (next) setCompareMode(false); // mutually exclusive
+      return next;
+    });
+  }
+
+  function toggleCompareMutex() {
+    setCompareMode((v) => {
+      const next = !v;
+      if (next) setComputerUseMode(false); // mutually exclusive
+      return next;
+    });
+  }
+
+  async function handlePickPreset(p: Preset) {
+    try {
+      const saved = await setPreset(p);
+      setPermissionPresetState(saved);
+    } catch (e) {
+      pushSystem(`Failed to save preset: ${String(e)}`);
+    }
+  }
+
+  async function handlePickWorkspace() {
+    const picked = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "Pick a workspace folder",
+    });
+    if (!picked || typeof picked !== "string") return;
+    const warn = workspaceWarning(picked);
+    if (warn) pushSystem(`Workspace: ${warn}`);
+    try {
+      const saved = await saveWorkspaceRoot(picked);
+      setWorkspaceState(saved);
+    } catch (e) {
+      pushSystem(`Failed to set workspace: ${String(e)}`);
+    }
+  }
 
   function patchActiveChat(fn: (c: Chat) => Chat) {
     setChats((prev) => prev.map((c) => (c.id === activeChatId ? fn(c) : c)));
@@ -247,6 +396,17 @@ function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  function requestLoadBase(base: StoreBase) {
+    const current = status?.base_model_id;
+    const switching = !!current && current !== base.hf_repo;
+    const hasAdapters = (status?.adapters.length ?? 0) > 0;
+    if (switching && hasAdapters) {
+      setPendingBase(base);
+      return;
+    }
+    void handleLoadBase(base);
+  }
 
   async function handleLoadBase(base: StoreBase) {
     setBusy(true);
@@ -344,7 +504,10 @@ function App() {
     setBusy(false);
   }
 
-  async function handleInstallAdapter(adapter: StoreAdapter) {
+  async function handleInstallAdapter(
+    adapter: StoreAdapter,
+    afterInstallPrompt?: string,
+  ) {
     if (!baseLoaded) {
       setView("chat");
       pushSystem("Load the base model first.");
@@ -352,7 +515,12 @@ function App() {
     }
     if (status?.adapters.some((a) => a.name === adapter.slug)) {
       setView("chat");
-      pushSystem(`"${adapter.slug}" is already installed.`);
+      setStatus((s) => (s ? { ...s, active_adapter: adapter.slug } : s));
+      if (afterInstallPrompt) {
+        await runNormalTurn(afterInstallPrompt, adapter.slug);
+      } else {
+        pushSystem(`"${adapter.slug}" is already installed — set active.`);
+      }
       return;
     }
     setBusy(true);
@@ -441,6 +609,11 @@ function App() {
             : m,
         ),
       }));
+      if (afterInstallPrompt) {
+        setBusy(false);
+        await runNormalTurn(afterInstallPrompt, adapter.slug);
+        return;
+      }
     } catch (e) {
       patchActiveChat((c) => ({
         ...c,
@@ -452,6 +625,15 @@ function App() {
       }));
     }
     setBusy(false);
+  }
+
+  async function handleTryAdapter(adapter: StoreAdapter) {
+    const prompt = adapter.demo_prompt?.trim();
+    if (!prompt) {
+      pushSystem(`No demo prompt available for "${adapter.name}".`);
+      return;
+    }
+    await handleInstallAdapter(adapter, prompt);
   }
 
   async function handleCreateTestAdapters() {
@@ -494,7 +676,17 @@ function App() {
       pushSystem("Load the base model first.");
       return;
     }
+    if (compareMode && status?.active_adapter) {
+      return handleSendCompare(prompt, status.active_adapter);
+    }
+    if (computerUseMode) {
+      return runAgentTurn(prompt);
+    }
     setInput("");
+    await runNormalTurn(prompt, status?.active_adapter ?? null);
+  }
+
+  async function runNormalTurn(prompt: string, adapter: string | null) {
     setBusy(true);
 
     const userMsg: Message = {
@@ -507,7 +699,7 @@ function App() {
       id: assistantId,
       role: "assistant",
       text: "",
-      adapter: status?.active_adapter ?? null,
+      adapter,
       pending: true,
     };
     patchActiveChat((c) => ({
@@ -516,13 +708,10 @@ function App() {
       messages: [...c.messages, userMsg, assistantMsg],
     }));
 
-    const history: sidecar.ChatMessage[] = activeChat.messages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .filter((m) => m.text.trim().length > 0)
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.text }));
+    const history: sidecar.ChatMessage[] = buildHistory(activeChat.messages);
 
     const handle = sidecar.generate(prompt, {
-      adapter: status?.active_adapter ?? undefined,
+      adapter: adapter ?? undefined,
       messages: history,
       temperature: settings.temperature,
       topP: settings.topP,
@@ -531,7 +720,9 @@ function App() {
         patchActiveChat((c) => ({
           ...c,
           messages: c.messages.map((m) =>
-            m.id === assistantId ? { ...m, text: m.text + text } : m,
+            m.id === assistantId && m.role === "assistant"
+              ? { ...m, text: m.text + text }
+              : m,
           ),
         }));
       },
@@ -543,7 +734,7 @@ function App() {
     patchActiveChat((c) => ({
       ...c,
       messages: c.messages.map((m) => {
-        if (m.id !== assistantId) return m;
+        if (m.id !== assistantId || m.role !== "assistant") return m;
         if (res.type === "error") {
           return { ...m, text: `[error: ${res.error.message}]`, pending: false };
         }
@@ -552,6 +743,293 @@ function App() {
         return { ...m, text: m.text + suffix, pending: false };
       }),
     }));
+    setBusy(false);
+  }
+
+  async function runAgentTurn(prompt: string) {
+    if (!workspace) {
+      pushSystem(
+        "Pick a workspace before running Computer Use — use the footer bar under the composer.",
+      );
+      return;
+    }
+
+    setInput("");
+    setBusy(true);
+
+    const userMsg: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text: prompt,
+    };
+    patchActiveChat((c) => ({
+      ...c,
+      title: c.title || prompt.slice(0, 48),
+      messages: [...c.messages, userMsg],
+    }));
+
+    let history: sidecar.ChatMessage[] = buildHistory(activeChat.messages);
+    let currentPrompt = prompt;
+    const adapter = status?.active_adapter ?? null;
+    const MAX_STEPS = 8;
+    let stopped: "ok" | "error" | "aborted" | "maxsteps" = "ok";
+
+    try {
+      for (let step = 0; step < MAX_STEPS; step++) {
+        const assistantId = crypto.randomUUID();
+        patchActiveChat((c) => ({
+          ...c,
+          messages: [
+            ...c.messages,
+            {
+              id: assistantId,
+              role: "assistant",
+              text: "",
+              adapter,
+              pending: true,
+            },
+          ],
+        }));
+
+        let assistantAccum = "";
+        let toolCall: sidecar.SidecarToolCall | null = null;
+        let toolProtoErr: string | null = null;
+
+        const handle = sidecar.generate(currentPrompt, {
+          adapter: adapter ?? undefined,
+          messages: history,
+          temperature: settings.temperature,
+          topP: settings.topP,
+          maxTokens: settings.maxTokens,
+          tools: TOOL_DEFS,
+          onToken: (text) => {
+            assistantAccum += text;
+            patchActiveChat((c) => ({
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id === assistantId && m.role === "assistant"
+                  ? { ...m, text: m.text + text }
+                  : m,
+              ),
+            }));
+          },
+          onToolCall: (call) => {
+            toolCall = call;
+          },
+          onToolError: (err) => {
+            toolProtoErr = err.error;
+          },
+        });
+        setInflightGenId(handle.id);
+        const res = await handle.result;
+        setInflightGenId(null);
+
+        patchActiveChat((c) => ({
+          ...c,
+          messages: c.messages.map((m) => {
+            if (m.id !== assistantId || m.role !== "assistant") return m;
+            if (res.type === "error") {
+              return {
+                ...m,
+                text: m.text + `\n[error: ${res.error.message}]`,
+                pending: false,
+              };
+            }
+            const r = res.result as { aborted?: boolean };
+            return {
+              ...m,
+              text: m.text + (r.aborted ? " ⏹" : ""),
+              pending: false,
+            };
+          }),
+        }));
+
+        if (res.type === "error") {
+          stopped = "error";
+          break;
+        }
+        const r = res.result as { aborted?: boolean };
+        if (r.aborted) {
+          stopped = "aborted";
+          break;
+        }
+
+        // Tool-call protocol failure: feed the error back so the model can
+        // self-correct, then continue the loop.
+        if (toolProtoErr && !toolCall) {
+          history.push({ role: "assistant", content: assistantAccum });
+          currentPrompt = `[tool_error] ${toolProtoErr}\nReformat your tool call using the exact <tool_call>{...}</tool_call> format on a single line, or answer the user in plain text if no tool is needed.`;
+          continue;
+        }
+
+        if (!toolCall) {
+          // Clean end — model finished without asking for a tool.
+          break;
+        }
+
+        // Tool call received: render the pending bubble, run the tool,
+        // update the bubble with the result.
+        // TS gets stuck narrowing `toolCall` inside callbacks; materialize.
+        const call: sidecar.SidecarToolCall = toolCall;
+        const tcId = crypto.randomUUID();
+        const tcMsg: ToolCallMessage = {
+          id: tcId,
+          role: "tool_call",
+          callId: call.call_id,
+          name: call.name,
+          args: call.args,
+          status: "pending",
+        };
+        patchActiveChat((c) => ({ ...c, messages: [...c.messages, tcMsg] }));
+
+        const result = await runTool(call.name, call.args);
+        patchActiveChat((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.id === tcId && m.role === "tool_call"
+              ? {
+                  ...m,
+                  status: result.status,
+                  output: result.output,
+                  error: result.error,
+                  truncated: result.truncated,
+                }
+              : m,
+          ),
+        }));
+
+        // Build the next iteration's history: the assistant's text +
+        // its emitted tool call, followed by the tool result as the
+        // next user prompt.
+        const assistantContent =
+          assistantAccum +
+          `\n<tool_call>${JSON.stringify({
+            name: call.name,
+            args: call.args,
+          })}</tool_call>`;
+        history = [...history, { role: "assistant", content: assistantContent }];
+        const resultBody =
+          result.status === "success"
+            ? (result.output ?? "")
+            : (result.error ?? "unknown error");
+        currentPrompt = `[tool result: ${call.name}${
+          result.status !== "success" ? " " + result.status : ""
+        }]\n${resultBody}`;
+      }
+
+      if (stopped === "ok") {
+        // Hit the max-steps cap without a clean finish.
+        if (history.length && currentPrompt.startsWith("[tool result:")) {
+          stopped = "maxsteps";
+        }
+      }
+      if (stopped === "maxsteps") {
+        pushSystem(
+          `Stopped after ${MAX_STEPS} tool steps. Send another message to continue.`,
+        );
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSendCompare(prompt: string, adapter: string) {
+    setInput("");
+    setBusy(true);
+
+    const userMsg: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text: prompt,
+    };
+    const compareId = crypto.randomUUID();
+    const compareMsg: ComparisonMessage = {
+      id: compareId,
+      role: "comparison",
+      prompt,
+      adapter,
+      baseText: "",
+      adapterText: "",
+      pending: "base",
+    };
+    patchActiveChat((c) => ({
+      ...c,
+      title: c.title || prompt.slice(0, 48),
+      messages: [...c.messages, userMsg, compareMsg],
+    }));
+
+    const history: sidecar.ChatMessage[] = buildHistory(activeChat.messages);
+
+    function patchCompare(
+      update: (m: ComparisonMessage) => ComparisonMessage,
+    ) {
+      patchActiveChat((c) => ({
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === compareId && m.role === "comparison" ? update(m) : m,
+        ),
+      }));
+    }
+
+    const baseHandle = sidecar.generate(prompt, {
+      baseOnly: true,
+      messages: history,
+      temperature: settings.temperature,
+      topP: settings.topP,
+      maxTokens: settings.maxTokens,
+      onToken: (text) =>
+        patchCompare((m) => ({ ...m, baseText: m.baseText + text })),
+    });
+    setInflightGenId(baseHandle.id);
+    const baseRes = await baseHandle.result;
+    setInflightGenId(null);
+
+    if (baseRes.type === "error") {
+      patchCompare((m) => ({
+        ...m,
+        baseText: `${m.baseText}\n\n[error: ${baseRes.error.message}]`,
+        pending: null,
+      }));
+      setBusy(false);
+      return;
+    }
+    const baseAborted = (baseRes.result as { aborted?: boolean }).aborted;
+    if (baseAborted) {
+      patchCompare((m) => ({ ...m, baseText: m.baseText + " ⏹", pending: null }));
+      setBusy(false);
+      return;
+    }
+
+    patchCompare((m) => ({ ...m, pending: "adapter" }));
+
+    const adapterHandle = sidecar.generate(prompt, {
+      adapter,
+      messages: history,
+      temperature: settings.temperature,
+      topP: settings.topP,
+      maxTokens: settings.maxTokens,
+      onToken: (text) =>
+        patchCompare((m) => ({ ...m, adapterText: m.adapterText + text })),
+    });
+    setInflightGenId(adapterHandle.id);
+    const adapterRes = await adapterHandle.result;
+    setInflightGenId(null);
+
+    patchCompare((m) => {
+      if (adapterRes.type === "error") {
+        return {
+          ...m,
+          adapterText: `${m.adapterText}\n\n[error: ${adapterRes.error.message}]`,
+          pending: null,
+        };
+      }
+      const r = adapterRes.result as { aborted?: boolean };
+      return {
+        ...m,
+        adapterText: m.adapterText + (r.aborted ? " ⏹" : ""),
+        pending: null,
+      };
+    });
     setBusy(false);
   }
 
@@ -569,7 +1047,9 @@ function App() {
       userIdx -= 1;
     }
     if (userIdx < 0) return;
-    const userPrompt = activeChat.messages[userIdx].text;
+    const userMessage = activeChat.messages[userIdx];
+    if (userMessage.role !== "user") return;
+    const userPrompt = userMessage.text;
 
     // Truncate everything from the user message onward and re-add a fresh
     // user + pending assistant.
@@ -579,7 +1059,7 @@ function App() {
       ...c,
       messages: [
         ...beforeUser,
-        { ...activeChat.messages[userIdx] },
+        { ...userMessage },
         {
           id: newAssistantId,
           role: "assistant",
@@ -590,10 +1070,7 @@ function App() {
       ],
     }));
 
-    const history: sidecar.ChatMessage[] = beforeUser
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .filter((m) => m.text.trim().length > 0)
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.text }));
+    const history: sidecar.ChatMessage[] = buildHistory(beforeUser);
 
     setBusy(true);
     const handle = sidecar.generate(userPrompt, {
@@ -606,7 +1083,9 @@ function App() {
         patchActiveChat((c) => ({
           ...c,
           messages: c.messages.map((m) =>
-            m.id === newAssistantId ? { ...m, text: m.text + text } : m,
+            m.id === newAssistantId && m.role === "assistant"
+              ? { ...m, text: m.text + text }
+              : m,
           ),
         }));
       },
@@ -618,7 +1097,7 @@ function App() {
     patchActiveChat((c) => ({
       ...c,
       messages: c.messages.map((m) => {
-        if (m.id !== newAssistantId) return m;
+        if (m.id !== newAssistantId || m.role !== "assistant") return m;
         if (res.type === "error") {
           return { ...m, text: `[error: ${res.error.message}]`, pending: false };
         }
@@ -673,12 +1152,16 @@ function App() {
           </div>
         )}
 
+        {view === "chat" && status?.active_adapter && (
+          <ActiveAdapterStrip name={status.active_adapter} />
+        )}
+
         {view === "models" ? (
           <ModelsView
             bases={bases}
             activeBaseId={activeBase?.base_id ?? null}
             busy={busy}
-            onLoad={handleLoadBase}
+            onLoad={requestLoadBase}
             onBack={() => setView("chat")}
           />
         ) : view === "adapters" ? (
@@ -698,6 +1181,7 @@ function App() {
             installedSlugs={installedSlugs}
             busy={busy}
             onInstall={handleInstallAdapter}
+            onTry={handleTryAdapter}
             onBack={() => setView("chat")}
           />
         ) : isWelcome ? (
@@ -711,18 +1195,21 @@ function App() {
             bases={bases}
             onPickBase={(id) => {
               const b = bases.find((x) => x.base_id === id);
-              if (b) handleLoadBase(b);
+              if (b) requestLoadBase(b);
             }}
             adapters={status?.adapters ?? []}
             adapter={status?.active_adapter ?? null}
             onPickAdapter={pickAdapter}
+            baseSha={status?.base_sha ?? null}
+            installedSlugs={installedSlugs}
+            onTryAdapter={handleTryAdapter}
             chips={defaultChips({
               baseLoaded,
               adaptersInstalled: status?.adapters.length ?? 0,
               bases,
               onLoadBase: (baseId) => {
                 const b = bases.find((x) => x.base_id === baseId);
-                if (b) handleLoadBase(b);
+                if (b) requestLoadBase(b);
               },
               onOpenStore: () => setView("store"),
               onLoadLocalAdapter: handleLoadLocalAdapter,
@@ -743,7 +1230,7 @@ function App() {
             bases={bases}
             onPickBase={(id) => {
               const b = bases.find((x) => x.base_id === id);
-              if (b) handleLoadBase(b);
+              if (b) requestLoadBase(b);
             }}
             adapters={status?.adapters ?? []}
             adapter={status?.active_adapter ?? null}
@@ -751,6 +1238,15 @@ function App() {
             onRegenerate={handleRegenerate}
             onStop={handleStop}
             canStop={inflightGenId !== null}
+            compareMode={compareMode}
+            onToggleCompare={toggleCompareMutex}
+            compareAvailable={!!status?.active_adapter}
+            computerUseMode={computerUseMode}
+            onToggleComputerUse={toggleComputerUse}
+            permissionPreset={permissionPreset}
+            onPickPreset={handlePickPreset}
+            workspace={workspace}
+            onPickWorkspace={handlePickWorkspace}
           />
         )}
       </main>
@@ -760,6 +1256,32 @@ function App() {
           settings={settings}
           onChange={setSettings}
           onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {pendingBase && (
+        <ConfirmModal
+          title="Switch base model?"
+          confirmLabel={`Load ${pendingBase.name}`}
+          body={
+            <>
+              <p>
+                Loading <strong className="text-app-text">{pendingBase.name}</strong>{" "}
+                will unload your {status?.adapters.length ?? 0} loaded adapter
+                {status?.adapters.length === 1 ? "" : "s"} from memory.
+              </p>
+              <p className="mt-2 text-xs text-app-text-faint">
+                You can reinstall them from the store, or reload from disk. Adapters
+                that live locally are not deleted.
+              </p>
+            </>
+          }
+          onCancel={() => setPendingBase(null)}
+          onConfirm={() => {
+            const b = pendingBase;
+            setPendingBase(null);
+            void handleLoadBase(b);
+          }}
         />
       )}
     </div>
@@ -779,6 +1301,9 @@ function WelcomeScreen({
   baseId,
   onPickBase,
   chips,
+  baseSha,
+  installedSlugs,
+  onTryAdapter,
 }: {
   input: string;
   onInputChange: (v: string) => void;
@@ -792,6 +1317,9 @@ function WelcomeScreen({
   baseId: string | null;
   onPickBase: (baseId: string) => void;
   chips: ReturnType<typeof defaultChips>;
+  baseSha: string | null;
+  installedSlugs: Set<string>;
+  onTryAdapter: (adapter: StoreAdapter) => void;
 }) {
   return (
     <div className="flex flex-1 items-center justify-center px-6">
@@ -814,7 +1342,19 @@ function WelcomeScreen({
           adapterLabel={adapter}
           onPickAdapter={onPickAdapter}
         />
+        <WalkthroughHint
+          baseLoaded={!!baseSha}
+          adaptersInstalled={adapters.length > 0}
+        />
         <QuickChips chips={chips} />
+        {baseSha && (
+          <FeaturedAdapters
+            baseSha={baseSha}
+            installedSlugs={installedSlugs}
+            onTry={onTryAdapter}
+          />
+        )}
+        {bases.some((b) => b.base_id === "gemma-4-e4b-it-4bit") && <Gemma4Tile />}
       </div>
     </div>
   );
@@ -838,8 +1378,17 @@ function ChatView({
   onRegenerate,
   onStop,
   canStop,
+  compareMode,
+  onToggleCompare,
+  compareAvailable,
+  computerUseMode,
+  onToggleComputerUse,
+  permissionPreset,
+  onPickPreset,
+  workspace,
+  onPickWorkspace,
 }: {
-  messages: Message[];
+  messages: AnyMessage[];
   input: string;
   onInputChange: (v: string) => void;
   onSubmit: () => void;
@@ -856,38 +1405,66 @@ function ChatView({
   onRegenerate: (assistantId: string) => void;
   onStop: () => void;
   canStop: boolean;
+  compareMode: boolean;
+  onToggleCompare: () => void;
+  compareAvailable: boolean;
+  computerUseMode: boolean;
+  onToggleComputerUse: () => void;
+  permissionPreset: Preset;
+  onPickPreset: (p: Preset) => void;
+  workspace: Workspace | null;
+  onPickWorkspace: () => void;
 }) {
   const lastAssistantId = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "assistant" && !messages[i].pending) {
-        return messages[i].id;
-      }
+      const m = messages[i];
+      if (m.role === "assistant" && !m.pending) return m.id;
     }
     return null;
   })();
   const pendingAssistantId = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "assistant" && messages[i].pending) {
-        return messages[i].id;
-      }
+      const m = messages[i];
+      if (m.role === "assistant" && m.pending) return m.id;
+      if (m.role === "comparison" && m.pending) return m.id;
     }
     return null;
   })();
+  const hasCompare = messages.some((m) => m.role === "comparison");
 
   return (
     <>
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-8">
-        <div className="mx-auto flex max-w-3xl flex-col gap-4">
-          {messages.map((m) => (
-            <MessageBubble
-              key={m.id}
-              message={m}
-              canRegenerate={m.id === lastAssistantId && !busy}
-              onRegenerate={() => onRegenerate(m.id)}
-              canStop={m.id === pendingAssistantId && canStop}
-              onStop={onStop}
-            />
-          ))}
+        <div
+          className={`mx-auto flex flex-col gap-4 ${
+            hasCompare ? "max-w-5xl" : "max-w-3xl"
+          }`}
+        >
+          {messages.map((m) => {
+            if (m.role === "comparison") {
+              return (
+                <CompareBubble
+                  key={m.id}
+                  message={m}
+                  canStop={m.id === pendingAssistantId && canStop}
+                  onStop={onStop}
+                />
+              );
+            }
+            if (m.role === "tool_call") {
+              return <ToolCallBubble key={m.id} message={m} />;
+            }
+            return (
+              <MessageBubble
+                key={m.id}
+                message={m}
+                canRegenerate={m.id === lastAssistantId && !busy}
+                onRegenerate={() => onRegenerate(m.id)}
+                canStop={m.id === pendingAssistantId && canStop}
+                onStop={onStop}
+              />
+            );
+          })}
         </div>
       </div>
       <div className="border-t border-app-border bg-app-bg px-6 py-4">
@@ -896,7 +1473,15 @@ function ChatView({
           onChange={onInputChange}
           onSubmit={onSubmit}
           disabled={busy || !baseLoaded}
-          placeholder={baseLoaded ? "Reply…" : "Load the base model first"}
+          placeholder={
+            computerUseMode
+              ? "Describe a task — I'll use tools to do it"
+              : compareMode
+                ? "Compare prompt — base vs adapter"
+                : baseLoaded
+                  ? "Reply…"
+                  : "Load the base model first"
+          }
           baseLabel={baseLabel}
           baseId={baseId}
           bases={bases}
@@ -904,7 +1489,23 @@ function ChatView({
           adapters={adapters}
           adapterLabel={adapter}
           onPickAdapter={onPickAdapter}
+          compareMode={compareMode}
+          onToggleCompare={onToggleCompare}
+          compareAvailable={compareAvailable}
+          computerUseMode={computerUseMode}
+          onToggleComputerUse={onToggleComputerUse}
+          permissionPreset={permissionPreset}
+          onPickPreset={onPickPreset}
         />
+        {computerUseMode && (
+          <WorkspaceFooter
+            workspace={workspace}
+            preset={permissionPreset}
+            baseLabel={baseLabel}
+            adapterName={adapter}
+            onPickWorkspace={onPickWorkspace}
+          />
+        )}
       </div>
     </>
   );
@@ -952,11 +1553,7 @@ function MessageBubble({
             : "text-app-text"
         }`}
       >
-        {message.adapter && !isUser && (
-          <div className="mb-1 text-[10px] uppercase tracking-wide text-app-text-faint">
-            {message.adapter}
-          </div>
-        )}
+        {message.adapter && !isUser && <AdapterPill name={message.adapter} />}
         {isUser ? (
           message.text || (message.pending ? "…" : "")
         ) : message.text ? (
@@ -987,6 +1584,128 @@ function MessageBubble({
           Regenerate
         </button>
       )}
+    </div>
+  );
+}
+
+function WalkthroughHint({
+  baseLoaded,
+  adaptersInstalled,
+}: {
+  baseLoaded: boolean;
+  adaptersInstalled: boolean;
+}) {
+  const step = !baseLoaded
+    ? { n: 1, label: "Pick a base model" }
+    : !adaptersInstalled
+      ? { n: 2, label: "Install your first adapter" }
+      : { n: 3, label: "Send a prompt — try compare mode after" };
+  return (
+    <div className="mx-auto mt-5 flex max-w-2xl items-center justify-center gap-2 text-[11px] uppercase tracking-wide text-app-text-faint">
+      <span className="rounded-full border border-app-border px-1.5 py-0.5 text-[10px]">
+        {step.n} / 3
+      </span>
+      <span>{step.label}</span>
+    </div>
+  );
+}
+
+function CompareBubble({
+  message,
+  canStop,
+  onStop,
+}: {
+  message: ComparisonMessage;
+  canStop?: boolean;
+  onStop?: () => void;
+}) {
+  const accent = adapterAccent(message.adapter);
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-[10px] uppercase tracking-wide text-app-text-faint">
+        Compare · same prompt, different adapter
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <ComparePane
+          label="Base (no adapter)"
+          text={message.baseText}
+          pending={message.pending === "base"}
+          done={message.pending !== "base" && !!message.baseText}
+        />
+        <ComparePane
+          label="With adapter"
+          adapterName={message.adapter}
+          accentBorder={accent.border}
+          text={message.adapterText}
+          pending={message.pending === "adapter"}
+          done={message.pending === null && !!message.adapterText}
+        />
+      </div>
+      {canStop && onStop && (
+        <button
+          type="button"
+          onClick={onStop}
+          className="self-start flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-app-text-faint hover:bg-app-surface-hover hover:text-app-text"
+          title="Stop generating"
+        >
+          <Square size={10} className="fill-current" />
+          Stop
+        </button>
+      )}
+    </div>
+  );
+}
+
+function ComparePane({
+  label,
+  adapterName,
+  accentBorder,
+  text,
+  pending,
+  done,
+}: {
+  label: string;
+  adapterName?: string;
+  accentBorder?: string;
+  text: string;
+  pending: boolean;
+  done: boolean;
+}) {
+  return (
+    <div
+      className="flex min-h-[160px] flex-col gap-2 rounded-xl border bg-app-surface p-4"
+      style={{ borderColor: accentBorder ?? undefined }}
+    >
+      <div className="flex items-center gap-2 text-[11px] uppercase tracking-wide text-app-text-faint">
+        <span>{label}</span>
+        {adapterName && <AdapterPill name={adapterName} />}
+        {pending && <span className="text-app-accent">· streaming</span>}
+      </div>
+      <div className="text-sm leading-relaxed text-app-text">
+        {text ? (
+          <Markdown>{text}</Markdown>
+        ) : pending ? (
+          "…"
+        ) : done ? null : (
+          <span className="text-app-text-faint">(waiting)</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdapterPill({ name }: { name: string }) {
+  const accent = adapterAccent(name);
+  return (
+    <div
+      className="mb-1.5 inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide"
+      style={{
+        backgroundColor: accent.bg,
+        color: accent.text,
+        borderColor: accent.border,
+      }}
+    >
+      {name}
     </div>
   );
 }

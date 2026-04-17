@@ -10,6 +10,7 @@ import json
 import sys
 import threading
 import traceback
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,6 +53,10 @@ class State:
     adapters: "OrderedDict[str, AdapterEntry]" = field(default_factory=OrderedDict)
     cache_capacity: int = 3
     active_adapter: str | None = None
+    # When base_only is requested, we stash the current LoRA weights here and
+    # swap zeros into the wrapped LoRA matrices so the forward pass behaves
+    # like the un-adapted base. Restored in the op_generate finally block.
+    saved_lora: dict | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -300,6 +305,33 @@ def op_unload_adapter(req: dict) -> dict:
     return {"name": name, "unloaded": True, "cache_size": len(STATE.adapters)}
 
 
+def _lora_save_and_zero() -> None:
+    """Save the currently-loaded LoRA weights and replace them with zeros
+    so the model behaves like un-adapted base for one generation. No-op if
+    the model isn't LoRA-wrapped or we've already saved.
+    """
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    if not STATE.lora_wrapped or STATE.saved_lora is not None:
+        return
+    trainable = dict(tree_flatten(STATE.model.trainable_parameters()))
+    STATE.saved_lora = {k: v for k, v in trainable.items()}
+    zeros = [(k, mx.zeros(v.shape, dtype=v.dtype)) for k, v in trainable.items()]
+    STATE.model.load_weights(zeros, strict=False)
+    mx.eval(STATE.model.parameters())
+
+
+def _lora_restore() -> None:
+    import mlx.core as mx
+
+    if STATE.saved_lora is None:
+        return
+    STATE.model.load_weights(list(STATE.saved_lora.items()), strict=False)
+    mx.eval(STATE.model.parameters())
+    STATE.saved_lora = None
+
+
 def _swap_to_adapter(name: str | None) -> None:
     """Swap the model to point at the named adapter's weights. If the adapter's
     lora config differs from the currently-wrapped one, re-wraps the base first.
@@ -325,27 +357,84 @@ def _swap_to_adapter(name: str | None) -> None:
     STATE.adapters.move_to_end(name)
 
 
-def _format_prompt(prompt: str, messages: list | None) -> str:
+TOOL_OPEN = "<tool_call>"
+TOOL_CLOSE = "</tool_call>"
+
+
+def _format_tools_prompt(tools: list) -> str:
+    """Render a compact tool-use preamble prepended to the first user turn.
+
+    Small models are sensitive to verbose instructions — keep this terse.
+    """
+    if not tools:
+        return ""
+    lines = ["You have access to these tools:"]
+    for t in tools:
+        name = t.get("name", "?")
+        desc = t.get("description", "")
+        params = t.get("parameters") or {}
+        param_parts = []
+        for key, meta in params.items():
+            ptype = meta.get("type", "any") if isinstance(meta, dict) else "any"
+            optional = (
+                "?" if isinstance(meta, dict) and not meta.get("required", True) else ""
+            )
+            param_parts.append(f"{key}{optional}: {ptype}")
+        param_str = ", ".join(param_parts)
+        lines.append(f"- {name}({param_str}) — {desc}")
+    lines.append("")
+    lines.append("To use a tool, emit on its own line EXACTLY:")
+    lines.append(f'{TOOL_OPEN}{{"name":"<tool_name>","args":{{...}}}}{TOOL_CLOSE}')
+    lines.append(
+        "Then stop and wait — the tool result will arrive as the next user message. "
+        "Reason step by step, call tools only when needed, end with a natural-language answer."
+    )
+    return "\n".join(lines)
+
+
+def _format_prompt(prompt: str, messages: list | None, tools_prompt: str = "") -> str:
     """Apply the tokenizer's chat template if available. Falls back to the raw
     prompt for base (non-instruct) models.
 
     `messages` (optional) is a list of {role, content} for multi-turn history;
     when omitted, the prompt is treated as a single user message.
+    `tools_prompt` (optional) is prepended to the first user message so the
+    model sees the tool-use instructions regardless of chat-template support
+    for a `system` role.
     """
     tok = STATE.tokenizer
     apply = getattr(tok, "apply_chat_template", None)
     if not callable(apply):
+        if tools_prompt:
+            return f"{tools_prompt}\n\n{prompt}"
         return prompt
 
     chat = list(messages) if messages else []
     if not chat or chat[-1].get("role") != "user":
         chat.append({"role": "user", "content": prompt})
 
+    if tools_prompt:
+        for i, m in enumerate(chat):
+            if m.get("role") == "user":
+                chat[i] = {**m, "content": f"{tools_prompt}\n\n{m['content']}"}
+                break
+
     try:
         return apply(chat, add_generation_prompt=True, tokenize=False)
     except Exception as e:
         log(f"chat template failed ({e}); using raw prompt")
         return prompt
+
+
+def _partial_marker_suffix(buf: str, marker: str) -> int:
+    """Longest suffix of `buf` that is a prefix of `marker`. Used to decide
+    how much of the current buffer to hold back in case a marker is only
+    half-delivered across chunk boundaries."""
+    upper = min(len(buf), len(marker))
+    for i in range(upper, 0, -1):
+        if buf.endswith(marker[:i]):
+            return i
+    return 0
 
 
 def op_generate(req: dict) -> dict:
@@ -364,6 +453,8 @@ def op_generate(req: dict) -> dict:
     top_p = float(req.get("top_p", 0.95))
     messages = req.get("messages")
     adapter = req.get("adapter")
+    base_only = bool(req.get("base_only", False))
+    tools = req.get("tools") or []
 
     abort_event = threading.Event()
     with GEN_LOCK:
@@ -376,10 +467,13 @@ def op_generate(req: dict) -> dict:
         ACTIVE_ABORT_EVENT = abort_event
 
     try:
-        if adapter is not None and adapter != STATE.active_adapter:
+        if base_only:
+            _lora_save_and_zero()
+        elif adapter is not None and adapter != STATE.active_adapter:
             _swap_to_adapter(adapter)
 
-        formatted = _format_prompt(prompt, messages)
+        tools_prompt = _format_tools_prompt(tools)
+        formatted = _format_prompt(prompt, messages, tools_prompt)
 
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
@@ -389,6 +483,18 @@ def op_generate(req: dict) -> dict:
         req_id = req["id"]
         pieces: list[str] = []
         aborted = False
+
+        # Tool-call scanner state. We buffer a trailing slice of generated
+        # text large enough to detect an opening `<tool_call>` even when it
+        # spans chunk boundaries. Once seen, we flush the pre-marker text as
+        # a token event and accumulate the body until `</tool_call>`, then
+        # emit a structured tool_call event and stop generating.
+        buffer = ""
+        in_tool_call = False
+        tool_body = ""
+        pending_tool_call: dict | None = None
+        tool_call_error: str | None = None
+
         for chunk in stream_generate(
             STATE.model,
             STATE.tokenizer,
@@ -403,14 +509,92 @@ def op_generate(req: dict) -> dict:
             if not text:
                 continue
             pieces.append(text)
-            emit({"id": req_id, "type": "token", "text": text})
+
+            if in_tool_call:
+                tool_body += text
+                if TOOL_CLOSE in tool_body:
+                    body, _, _ = tool_body.partition(TOOL_CLOSE)
+                    try:
+                        parsed = json.loads(body.strip())
+                        if not isinstance(parsed, dict) or "name" not in parsed:
+                            raise ValueError("tool_call must be a JSON object with a 'name'")
+                        pending_tool_call = {
+                            "call_id": str(uuid.uuid4()),
+                            "name": str(parsed["name"]),
+                            "args": parsed.get("args") or {},
+                        }
+                    except Exception as e:
+                        tool_call_error = f"tool_call parse error: {e}"
+                    break
+                continue
+
+            buffer += text
+            idx = buffer.find(TOOL_OPEN)
+            if idx >= 0:
+                pre = buffer[:idx]
+                if pre:
+                    emit({"id": req_id, "type": "token", "text": pre})
+                tool_body = buffer[idx + len(TOOL_OPEN):]
+                buffer = ""
+                in_tool_call = True
+                if TOOL_CLOSE in tool_body:
+                    body, _, _ = tool_body.partition(TOOL_CLOSE)
+                    try:
+                        parsed = json.loads(body.strip())
+                        if not isinstance(parsed, dict) or "name" not in parsed:
+                            raise ValueError("tool_call must be a JSON object with a 'name'")
+                        pending_tool_call = {
+                            "call_id": str(uuid.uuid4()),
+                            "name": str(parsed["name"]),
+                            "args": parsed.get("args") or {},
+                        }
+                    except Exception as e:
+                        tool_call_error = f"tool_call parse error: {e}"
+                    break
+                continue
+
+            # No marker seen. Hold back only the tail that could still become
+            # the start of a marker across chunk boundaries; flush the rest.
+            hold = _partial_marker_suffix(buffer, TOOL_OPEN)
+            if hold < len(buffer):
+                safe = buffer[: len(buffer) - hold]
+                if safe:
+                    emit({"id": req_id, "type": "token", "text": safe})
+                buffer = buffer[len(buffer) - hold :]
+
+        # Stream ended. Flush anything still held in buffer (no marker found).
+        if not in_tool_call and buffer:
+            emit({"id": req_id, "type": "token", "text": buffer})
+            buffer = ""
+
+        if pending_tool_call is not None:
+            emit(
+                {
+                    "id": req_id,
+                    "type": "tool_call",
+                    "call_id": pending_tool_call["call_id"],
+                    "name": pending_tool_call["name"],
+                    "args": pending_tool_call["args"],
+                }
+            )
+        elif tool_call_error is not None:
+            emit({"id": req_id, "type": "tool_error", "error": tool_call_error})
+        elif in_tool_call:
+            # Stream ended mid-tool-call without the close marker.
+            tool_call_error = "unclosed <tool_call> (model ran out of tokens)"
+            emit({"id": req_id, "type": "tool_error", "error": tool_call_error})
 
         return {
             "text": "".join(pieces),
-            "adapter": STATE.active_adapter,
+            "adapter": None if base_only else STATE.active_adapter,
             "aborted": aborted,
+            "base_only": base_only,
+            "pending_tool_call": pending_tool_call is not None,
+            "tool_call_error": tool_call_error,
         }
     finally:
+        if base_only:
+            _lora_restore()
         with GEN_LOCK:
             ACTIVE_GENERATION_ID = None
             ACTIVE_ABORT_EVENT = None
