@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { RefreshCw, Square } from "lucide-react";
-import { Logo } from "./components/Logo";
 import { Markdown } from "./components/Markdown";
 import {
   SettingsPanel,
@@ -13,7 +12,10 @@ import {
 import { Sidebar, type Conversation, type SidebarView } from "./components/Sidebar";
 import { Composer } from "./components/Composer";
 import { QuickChips, defaultChips } from "./components/QuickChips";
-import { StoreView } from "./components/StoreView";
+import { StoreLanding } from "./components/StoreLanding";
+import { StoreBrowse } from "./components/StoreBrowse";
+import { AdapterSpecSheet } from "./components/AdapterSpecSheet";
+import type { UseCase } from "./lib/editorial-data";
 import { ModelsView } from "./components/ModelsView";
 import { AdaptersView } from "./components/AdaptersView";
 import { ConfirmModal } from "./components/ConfirmModal";
@@ -22,7 +24,9 @@ import { FeaturedAdapters } from "./components/FeaturedAdapters";
 import { ActiveAdapterStrip } from "./components/ActiveAdapterStrip";
 import { WorkspaceFooter } from "./components/WorkspaceFooter";
 import { ToolCallBubble, type ToolCallMessage } from "./components/ToolCallBubble";
+import { TurnRow, SwapMarker, GutterBtn } from "./components/TurnRow";
 import { adapterAccent } from "./lib/adapter-accent";
+import { applyTheme, watchSystemTheme } from "./lib/theme";
 import {
   getPreset,
   getWorkspace,
@@ -235,6 +239,9 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [view, setView] = useState<View>("chat");
+  const [storeSubView, setStoreSubView] = useState<"landing" | "browse">("landing");
+  const [browsePreset, setBrowsePreset] = useState<{ useCase?: UseCase } | null>(null);
+  const [adapterDetailSlug, setAdapterDetailSlug] = useState<string | null>(null);
   const [pendingBase, setPendingBase] = useState<StoreBase | null>(null);
   const [compareMode, setCompareMode] = useState<boolean>(false);
   const [computerUseMode, setComputerUseMode] = useState<boolean>(false);
@@ -298,6 +305,12 @@ function App() {
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  useEffect(() => {
+    applyTheme(settings.theme);
+    if (settings.theme !== "system") return;
+    return watchSystemTheme(() => applyTheme(settings.theme));
+  }, [settings.theme]);
 
   useEffect(() => {
     if (!status?.active_adapter && compareMode) setCompareMode(false);
@@ -634,6 +647,24 @@ function App() {
       return;
     }
     await handleInstallAdapter(adapter, prompt);
+  }
+
+  async function handleInstallAdapterBySlug(slug: string) {
+    try {
+      const detail = await store.fetchAdapter(slug);
+      await handleInstallAdapter(detail.adapter);
+    } catch (e) {
+      pushSystem(`Failed to load adapter "${slug}": ${String(e)}`);
+    }
+  }
+
+  async function handleTryAdapterBySlug(slug: string) {
+    try {
+      const detail = await store.fetchAdapter(slug);
+      await handleTryAdapter(detail.adapter);
+    } catch (e) {
+      pushSystem(`Failed to load adapter "${slug}": ${String(e)}`);
+    }
   }
 
   async function handleCreateTestAdapters() {
@@ -1175,14 +1206,54 @@ function App() {
             onBack={() => setView("chat")}
           />
         ) : view === "store" ? (
-          <StoreView
+          storeSubView === "landing" ? (
+            <StoreLanding
+              baseSha={status?.base_sha ?? null}
+              baseLabel={baseLabel}
+              installedSlugs={installedSlugs}
+              busy={busy}
+              onInstall={handleInstallAdapter}
+              onTry={handleTryAdapter}
+              onOpenAdapter={(slug) => setAdapterDetailSlug(slug)}
+              onOpenBrowse={(preset) => {
+                setBrowsePreset(preset ?? null);
+                setStoreSubView("browse");
+              }}
+            />
+          ) : (
+            <StoreBrowse
+              key={browsePreset?.useCase ?? "__no_preset__"}
+              baseSha={status?.base_sha ?? null}
+              baseLabel={baseLabel}
+              installedSlugs={installedSlugs}
+              busy={busy}
+              preset={browsePreset}
+              onOpenAdapter={(slug) => setAdapterDetailSlug(slug)}
+              onOpenLanding={() => {
+                setBrowsePreset(null);
+                setStoreSubView("landing");
+              }}
+            />
+          )
+        ) : adapterDetailSlug ? (
+          <AdapterSpecSheet
+            slug={adapterDetailSlug}
             baseSha={status?.base_sha ?? null}
             baseLabel={baseLabel}
-            installedSlugs={installedSlugs}
+            installed={installedSlugs.has(adapterDetailSlug)}
             busy={busy}
-            onInstall={handleInstallAdapter}
-            onTry={handleTryAdapter}
-            onBack={() => setView("chat")}
+            onInstall={() => {
+              void handleInstallAdapterBySlug(adapterDetailSlug);
+            }}
+            onTry={() => {
+              void handleTryAdapterBySlug(adapterDetailSlug);
+            }}
+            onManage={() => {
+              pickAdapter(adapterDetailSlug);
+              setAdapterDetailSlug(null);
+              setView("adapters");
+            }}
+            onBack={() => setAdapterDetailSlug(null)}
           />
         ) : isWelcome ? (
           <WelcomeScreen
@@ -1203,6 +1274,7 @@ function App() {
             baseSha={status?.base_sha ?? null}
             installedSlugs={installedSlugs}
             onTryAdapter={handleTryAdapter}
+            workspacePath={workspace?.root ?? null}
             chips={defaultChips({
               baseLoaded,
               adaptersInstalled: status?.adapters.length ?? 0,
@@ -1226,6 +1298,7 @@ function App() {
             scrollRef={scrollRef}
             baseLabel={baseLabel}
             baseLoaded={baseLoaded}
+            baseSha={status?.base_sha ?? null}
             baseId={activeBase?.base_id ?? null}
             bases={bases}
             onPickBase={(id) => {
@@ -1304,6 +1377,7 @@ function WelcomeScreen({
   baseSha,
   installedSlugs,
   onTryAdapter,
+  workspacePath,
 }: {
   input: string;
   onInputChange: (v: string) => void;
@@ -1320,14 +1394,80 @@ function WelcomeScreen({
   baseSha: string | null;
   installedSlugs: Set<string>;
   onTryAdapter: (adapter: StoreAdapter) => void;
+  workspacePath: string | null;
 }) {
+  const ready = !!baseSha;
+  const eyebrow = `${adapter ?? "no adapter"} · ${baseLabel} · ${
+    ready ? "ready" : "load base to begin"
+  }`;
+
+  // Up to 4 colored suggestions — one per installed adapter, else fall back
+  // to the curated starter prompts.
+  const suggestions: { text: string; color: string; onClick: () => void }[] =
+    adapters.length > 0
+      ? adapters.slice(0, 4).map((a) => ({
+          text: starterPromptFor(a.name),
+          color: adapterAccent(a.name).text,
+          onClick: () => {
+            onPickAdapter(a.name);
+            onInputChange(starterPromptFor(a.name));
+          },
+        }))
+      : [];
+
   return (
-    <div className="flex flex-1 items-center justify-center px-6">
-      <div className="w-full max-w-2xl">
-        <h1 className="mb-8 flex items-center justify-center gap-3 text-5xl tracking-tight">
-          <Logo className="h-9 w-9 text-app-accent" />
-          <span style={{ fontFamily: "var(--font-serif)" }}>LoRA Hub</span>
-        </h1>
+    <div className="flex flex-1 flex-col">
+      <div className="flex-1 overflow-y-auto px-6 py-10">
+        <div className="mx-auto max-w-[720px] text-center">
+          <div className="mb-2 font-mono text-[11px] tracking-[0.14em] uppercase text-app-text-faint">
+            {eyebrow}
+          </div>
+          <h1 className="m-0 font-serif text-[32px] font-medium tracking-[-0.01em] text-app-text">
+            How can I help you today?
+          </h1>
+          <p className="mx-auto mt-2.5 mb-5 max-w-[520px] text-[14px] leading-[1.55] text-app-text-muted">
+            Every turn is tagged with the adapter and base that produced it.
+            Swap adapters mid-conversation — the transcript keeps the receipts.
+          </p>
+
+          {suggestions.length > 0 ? (
+            <div className="mx-auto grid max-w-[560px] grid-cols-2 gap-2">
+              {suggestions.map((s, i) => (
+                <button
+                  key={i}
+                  onClick={s.onClick}
+                  className="flex items-start gap-2 rounded-lg border border-app-border bg-app-surface px-3 py-2.5 text-left text-[13px] leading-[1.45] text-app-text hover:border-app-border-strong hover:bg-app-surface-hover"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="mt-[5px] inline-block h-2 w-2 shrink-0 rounded-[2px]"
+                    style={{ backgroundColor: s.color }}
+                  />
+                  <span>{s.text}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-4">
+              <WalkthroughHint
+                baseLoaded={ready}
+                adaptersInstalled={adapters.length > 0}
+              />
+              <QuickChips chips={chips} />
+              {baseSha && (
+                <FeaturedAdapters
+                  baseSha={baseSha}
+                  installedSlugs={installedSlugs}
+                  onTry={onTryAdapter}
+                />
+              )}
+              {bases.some((b) => b.base_id === "gemma-4-e4b-it-4bit") && <Gemma4Tile />}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="border-t border-app-border bg-app-bg px-6 py-4">
         <Composer
           large
           value={input}
@@ -1341,23 +1481,23 @@ function WelcomeScreen({
           adapters={adapters}
           adapterLabel={adapter}
           onPickAdapter={onPickAdapter}
+          baseSha={baseSha}
+          workspacePath={workspacePath}
         />
-        <WalkthroughHint
-          baseLoaded={!!baseSha}
-          adaptersInstalled={adapters.length > 0}
-        />
-        <QuickChips chips={chips} />
-        {baseSha && (
-          <FeaturedAdapters
-            baseSha={baseSha}
-            installedSlugs={installedSlugs}
-            onTry={onTryAdapter}
-          />
-        )}
-        {bases.some((b) => b.base_id === "gemma-4-e4b-it-4bit") && <Gemma4Tile />}
       </div>
     </div>
   );
+}
+
+function starterPromptFor(adapterName: string): string {
+  const s = adapterName.toLowerCase();
+  if (s.includes("sql")) return "top 10 customers by revenue last quarter";
+  if (s.includes("email") || s.includes("rewrite"))
+    return "rewrite this email more formally";
+  if (s.includes("grep") || s.includes("tool"))
+    return "extract JSON from an nginx log line";
+  if (s.includes("summar")) return "summarize this thread in three bullets";
+  return `try ${adapterName} on a real task from your workspace`;
 }
 
 function ChatView({
@@ -1369,6 +1509,7 @@ function ChatView({
   scrollRef,
   baseLabel,
   baseLoaded,
+  baseSha,
   adapters,
   adapter,
   onPickAdapter,
@@ -1396,6 +1537,7 @@ function ChatView({
   scrollRef: React.RefObject<HTMLDivElement | null>;
   baseLabel: string;
   baseLoaded: boolean;
+  baseSha: string | null;
   adapters: { name: string }[];
   adapter: string | null;
   onPickAdapter: (n: string | null) => void;
@@ -1430,42 +1572,54 @@ function ChatView({
     }
     return null;
   })();
-  const hasCompare = messages.some((m) => m.role === "comparison");
+  // Walk messages to detect adapter swaps between consecutive assistant turns.
+  // We emit a SwapMarker row ahead of the new assistant turn when its adapter
+  // differs from the most recent prior assistant adapter.
+  const rendered: React.ReactNode[] = [];
+  let lastAssistantAdapter: string | null | undefined = undefined;
+  for (const m of messages) {
+    if (m.role === "assistant") {
+      if (
+        lastAssistantAdapter !== undefined &&
+        (m.adapter ?? null) !== (lastAssistantAdapter ?? null) &&
+        m.adapter
+      ) {
+        rendered.push(<SwapMarker key={`swap-${m.id}`} adapterName={m.adapter} />);
+      }
+      lastAssistantAdapter = m.adapter ?? null;
+    }
+    if (m.role === "comparison") {
+      rendered.push(
+        <CompareTurn
+          key={m.id}
+          message={m}
+          canStop={m.id === pendingAssistantId && canStop}
+          onStop={onStop}
+        />,
+      );
+      continue;
+    }
+    if (m.role === "tool_call") {
+      rendered.push(<ToolTurn key={m.id} message={m} />);
+      continue;
+    }
+    rendered.push(
+      <MessageTurn
+        key={m.id}
+        message={m}
+        canRegenerate={m.id === lastAssistantId && !busy}
+        onRegenerate={() => onRegenerate(m.id)}
+        canStop={m.id === pendingAssistantId && canStop}
+        onStop={onStop}
+        baseLabel={baseLabel}
+      />,
+    );
+  }
 
   return (
     <>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-8">
-        <div
-          className={`mx-auto flex flex-col gap-4 ${
-            hasCompare ? "max-w-5xl" : "max-w-3xl"
-          }`}
-        >
-          {messages.map((m) => {
-            if (m.role === "comparison") {
-              return (
-                <CompareBubble
-                  key={m.id}
-                  message={m}
-                  canStop={m.id === pendingAssistantId && canStop}
-                  onStop={onStop}
-                />
-              );
-            }
-            if (m.role === "tool_call") {
-              return <ToolCallBubble key={m.id} message={m} />;
-            }
-            return (
-              <MessageBubble
-                key={m.id}
-                message={m}
-                canRegenerate={m.id === lastAssistantId && !busy}
-                onRegenerate={() => onRegenerate(m.id)}
-                canStop={m.id === pendingAssistantId && canStop}
-                onStop={onStop}
-              />
-            );
-          })}
-        </div>
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-7">
+        <div className="mx-auto flex max-w-[1020px] flex-col gap-0">{rendered}</div>
       </div>
       <div className="border-t border-app-border bg-app-bg px-6 py-4">
         <Composer
@@ -1496,6 +1650,8 @@ function ChatView({
           onToggleComputerUse={onToggleComputerUse}
           permissionPreset={permissionPreset}
           onPickPreset={onPickPreset}
+          baseSha={baseSha}
+          workspacePath={workspace?.root ?? null}
         />
         {computerUseMode && (
           <WorkspaceFooter
@@ -1511,28 +1667,28 @@ function ChatView({
   );
 }
 
-function MessageBubble({
+function MessageTurn({
   message,
   canRegenerate,
   onRegenerate,
   canStop,
   onStop,
+  baseLabel,
 }: {
   message: Message;
   canRegenerate?: boolean;
   onRegenerate?: () => void;
   canStop?: boolean;
   onStop?: () => void;
+  baseLabel: string;
 }) {
   if (message.role === "system") {
     return (
-      <div className="w-full self-center">
-        <div
-          className={`mx-auto flex max-w-lg flex-col gap-2 rounded-md bg-app-surface px-4 py-2 text-xs text-app-text-muted`}
-        >
+      <TurnRow kind="system" title="system">
+        <div className="flex max-w-md flex-col gap-1.5 rounded-md border border-app-border bg-app-surface/60 px-3 py-1.5 font-mono text-[11px] text-app-text-muted">
           <div>{message.text}</div>
           {message.progress && (
-            <div className="h-1 w-full overflow-hidden rounded-full bg-app-border">
+            <div className="h-[3px] w-full overflow-hidden rounded-sm bg-app-border">
               <div
                 className="h-full bg-app-accent transition-[width] duration-200"
                 style={{ width: `${Math.min(100, message.progress.percent)}%` }}
@@ -1540,51 +1696,61 @@ function MessageBubble({
             </div>
           )}
         </div>
-      </div>
+      </TurnRow>
     );
   }
-  const isUser = message.role === "user";
+  if (message.role === "user") {
+    return (
+      <TurnRow kind="user" title="you">
+        <div className="max-w-[760px] rounded-[10px] border border-app-border bg-app-surface px-3.5 py-2.5 text-[14px] leading-[1.55] whitespace-pre-wrap text-app-text">
+          {message.text || (message.pending ? "…" : "")}
+        </div>
+      </TurnRow>
+    );
+  }
+  // Assistant
+  const actions = (
+    <>
+      {canStop && onStop && (
+        <GutterBtn title="Stop generating" onClick={onStop}>
+          <Square size={9} className="fill-current" strokeWidth={0} />
+        </GutterBtn>
+      )}
+      {canRegenerate && onRegenerate && (
+        <GutterBtn title="Regenerate" onClick={onRegenerate}>
+          <RefreshCw size={10} strokeWidth={2} />
+        </GutterBtn>
+      )}
+    </>
+  );
   return (
-    <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
-      <div
-        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-          isUser
-            ? "whitespace-pre-wrap bg-app-surface text-app-text"
-            : "text-app-text"
-        }`}
-      >
-        {message.adapter && !isUser && <AdapterPill name={message.adapter} />}
-        {isUser ? (
-          message.text || (message.pending ? "…" : "")
-        ) : message.text ? (
+    <TurnRow
+      kind="assistant"
+      adapter={message.adapter ?? null}
+      title={message.adapter ?? "assistant"}
+      metaLines={[message.pending ? "streaming…" : undefined, baseLabel]}
+      actions={message.pending || canRegenerate ? actions : null}
+    >
+      <div className="max-w-[760px] text-[14px] leading-[1.6] text-app-text">
+        {message.text ? (
           <Markdown>{message.text}</Markdown>
+        ) : message.pending ? (
+          <span className="text-app-text-faint">…</span>
         ) : (
-          message.pending ? "…" : ""
+          ""
         )}
       </div>
-      {!isUser && canStop && onStop && (
-        <button
-          type="button"
-          onClick={onStop}
-          className="mt-1 flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-app-text-faint hover:bg-app-surface-hover hover:text-app-text"
-          title="Stop generating"
-        >
-          <Square size={10} className="fill-current" />
-          Stop
-        </button>
-      )}
-      {!isUser && canRegenerate && onRegenerate && (
-        <button
-          type="button"
-          onClick={onRegenerate}
-          className="mt-1 flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-app-text-faint hover:bg-app-surface-hover hover:text-app-text"
-          title="Regenerate response"
-        >
-          <RefreshCw size={12} />
-          Regenerate
-        </button>
-      )}
-    </div>
+    </TurnRow>
+  );
+}
+
+function ToolTurn({ message }: { message: ToolCallMessage }) {
+  return (
+    <TurnRow kind="tool" title="tool" metaLines={[message.status]}>
+      <div className="max-w-[760px]">
+        <ToolCallBubble message={message} />
+      </div>
+    </TurnRow>
   );
 }
 
@@ -1596,13 +1762,13 @@ function WalkthroughHint({
   adaptersInstalled: boolean;
 }) {
   const step = !baseLoaded
-    ? { n: 1, label: "Pick a base model" }
+    ? { n: 1, label: "pick a base model" }
     : !adaptersInstalled
-      ? { n: 2, label: "Install your first adapter" }
-      : { n: 3, label: "Send a prompt — try compare mode after" };
+      ? { n: 2, label: "install your first adapter" }
+      : { n: 3, label: "send a prompt — try compare mode after" };
   return (
-    <div className="mx-auto mt-5 flex max-w-2xl items-center justify-center gap-2 text-[11px] uppercase tracking-wide text-app-text-faint">
-      <span className="rounded-full border border-app-border px-1.5 py-0.5 text-[10px]">
+    <div className="mx-auto mt-4 flex max-w-2xl items-center justify-center gap-2 font-mono text-[11px] text-app-text-faint">
+      <span className="rounded-sm border border-app-border px-1 py-0.5">
         {step.n} / 3
       </span>
       <span>{step.label}</span>
@@ -1610,7 +1776,7 @@ function WalkthroughHint({
   );
 }
 
-function CompareBubble({
+function CompareTurn({
   message,
   canStop,
   onStop,
@@ -1620,20 +1786,27 @@ function CompareBubble({
   onStop?: () => void;
 }) {
   const accent = adapterAccent(message.adapter);
+  const actions = canStop && onStop && (
+    <GutterBtn title="Stop generating" onClick={onStop}>
+      <Square size={9} className="fill-current" strokeWidth={0} />
+    </GutterBtn>
+  );
   return (
-    <div className="flex flex-col gap-2">
-      <div className="text-[10px] uppercase tracking-wide text-app-text-faint">
-        Compare · same prompt, different adapter
-      </div>
+    <TurnRow
+      kind="comparison"
+      title={`compare · ${message.adapter}`}
+      metaLines={["same prompt · base vs adapter"]}
+      actions={actions || null}
+    >
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <ComparePane
-          label="Base (no adapter)"
+          label="base"
           text={message.baseText}
           pending={message.pending === "base"}
           done={message.pending !== "base" && !!message.baseText}
         />
         <ComparePane
-          label="With adapter"
+          label="adapter"
           adapterName={message.adapter}
           accentBorder={accent.border}
           text={message.adapterText}
@@ -1641,18 +1814,7 @@ function CompareBubble({
           done={message.pending === null && !!message.adapterText}
         />
       </div>
-      {canStop && onStop && (
-        <button
-          type="button"
-          onClick={onStop}
-          className="self-start flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-app-text-faint hover:bg-app-surface-hover hover:text-app-text"
-          title="Stop generating"
-        >
-          <Square size={10} className="fill-current" />
-          Stop
-        </button>
-      )}
-    </div>
+    </TurnRow>
   );
 }
 
@@ -1673,15 +1835,15 @@ function ComparePane({
 }) {
   return (
     <div
-      className="flex min-h-[160px] flex-col gap-2 rounded-xl border bg-app-surface p-4"
+      className="flex min-h-[160px] flex-col gap-2 rounded-lg border bg-app-surface p-3.5"
       style={{ borderColor: accentBorder ?? undefined }}
     >
-      <div className="flex items-center gap-2 text-[11px] uppercase tracking-wide text-app-text-faint">
+      <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.12em] text-app-text-faint">
         <span>{label}</span>
         {adapterName && <AdapterPill name={adapterName} />}
         {pending && <span className="text-app-accent">· streaming</span>}
       </div>
-      <div className="text-sm leading-relaxed text-app-text">
+      <div className="text-[13.5px] leading-[1.55] text-app-text">
         {text ? (
           <Markdown>{text}</Markdown>
         ) : pending ? (
@@ -1698,7 +1860,7 @@ function AdapterPill({ name }: { name: string }) {
   const accent = adapterAccent(name);
   return (
     <div
-      className="mb-1.5 inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide"
+      className="mb-1 inline-flex items-center rounded-sm border px-1.5 py-0 font-mono text-[10px] font-medium"
       style={{
         backgroundColor: accent.bg,
         color: accent.text,

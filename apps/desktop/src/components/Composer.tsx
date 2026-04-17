@@ -1,4 +1,4 @@
-import { Columns2 } from "lucide-react";
+import { Columns2, Paperclip } from "lucide-react";
 import { CommandPicker, type CommandPickerItem } from "./CommandPicker";
 import { ModeChip } from "./ModeChip";
 import { PermissionsPicker } from "./PermissionsPicker";
@@ -28,6 +28,10 @@ type Props = {
   onToggleComputerUse?: () => void;
   permissionPreset?: Preset;
   onPickPreset?: (p: Preset) => void;
+  /** Session sha — shown in the composer breadcrumb footer. */
+  baseSha?: string | null;
+  /** Workspace root — shown in the composer breadcrumb footer. */
+  workspacePath?: string | null;
 };
 
 export function Composer({
@@ -51,12 +55,14 @@ export function Composer({
   onToggleComputerUse,
   permissionPreset,
   onPickPreset,
+  baseSha,
+  workspacePath,
 }: Props) {
   const showAdapterPicker = adapters.length > 0 && !!onPickAdapter;
   const showBasePicker = bases.length > 1 && !!onPickBase;
   const showCompareToggle = !!onToggleCompare;
   const showModeChip = !!onToggleComputerUse;
-  const showPermsPicker = !!computerUseMode && !!onPickPreset && !!permissionPreset;
+  const showPermsPicker = !!onPickPreset && !!permissionPreset;
 
   const adapterItems: CommandPickerItem[] = adapters.map((a) => ({
     id: a.name,
@@ -77,10 +83,8 @@ export function Composer({
       className={`mx-auto w-full ${large ? "max-w-2xl" : "max-w-3xl"}`}
     >
       <div
-        className={`rounded-2xl border bg-app-surface px-4 pt-3 pb-2 shadow-[0_1px_0_rgba(255,255,255,0.02)_inset] ${
-          computerUseMode
-            ? "border-app-purple/50"
-            : "border-app-border"
+        className={`rounded-xl border bg-app-surface px-3.5 pt-2.5 pb-1.5 transition-colors ${
+          computerUseMode ? "border-app-purple/50" : "border-app-border"
         }`}
       >
         <div className="flex items-start gap-2">
@@ -94,8 +98,8 @@ export function Composer({
           )}
           <textarea
             rows={large ? 2 : 1}
-            className={`flex-1 min-w-0 resize-none bg-transparent text-app-text placeholder:text-app-text-faint focus:outline-none ${
-              large ? "min-h-[44px] text-base" : "min-h-[28px] text-sm"
+            className={`flex-1 min-w-0 resize-none bg-transparent font-sans text-app-text placeholder:text-app-text-faint focus:outline-none ${
+              large ? "min-h-[40px] text-[15px] leading-[1.45]" : "min-h-[24px] text-[14px] leading-[1.5]"
             }`}
             placeholder={placeholder ?? "How can I help you today?"}
             value={value}
@@ -110,14 +114,16 @@ export function Composer({
           />
         </div>
 
-        <div className="mt-1 flex items-center justify-end text-xs text-app-text-muted">
-          <div className="flex items-center gap-2">
-            {showPermsPicker && (
-              <PermissionsPicker
-                value={permissionPreset!}
-                onChange={onPickPreset!}
-              />
-            )}
+        <div className="mt-1.5 flex items-center gap-1.5 border-t border-dashed border-app-border pt-1.5 font-mono text-[11px] text-app-text-muted">
+          <button
+            type="button"
+            className="flex items-center gap-1 rounded-md border border-app-border px-2 py-1 text-app-text-muted hover:border-app-border-strong hover:bg-app-surface-hover hover:text-app-text"
+            title="Attach (coming soon)"
+          >
+            <Paperclip size={11} strokeWidth={2} />
+            attach
+          </button>
+          <div className="ml-auto flex items-center gap-1.5">
             {showCompareToggle && (
               <button
                 type="button"
@@ -130,14 +136,14 @@ export function Composer({
                       : "Turn on compare mode"
                     : "Select an adapter to enable compare mode"
                 }
-                className={`flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+                className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors ${
                   compareMode
-                    ? "bg-app-accent/15 text-app-accent"
-                    : "text-app-text-muted hover:bg-app-surface-hover hover:text-app-text disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-app-text-muted"
+                    ? "border-app-accent/50 bg-app-accent/15 text-app-accent"
+                    : "border-app-border text-app-text-muted hover:border-app-border-strong hover:bg-app-surface-hover hover:text-app-text disabled:cursor-not-allowed disabled:opacity-40"
                 }`}
               >
-                <Columns2 size={12} />
-                Compare
+                <Columns2 size={11} strokeWidth={2} />
+                compare
               </button>
             )}
             {showAdapterPicker ? (
@@ -169,9 +175,50 @@ export function Composer({
                 {baseLabel}
               </span>
             )}
+            {showPermsPicker && (
+              <PermissionsPicker
+                value={permissionPreset!}
+                onChange={onPickPreset!}
+              />
+            )}
           </div>
+        </div>
+
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-0 gap-y-1 px-0.5 pt-0.5 font-mono text-[10.5px] text-app-text-faint">
+          <span className="text-app-text-faint">base/</span>
+          <span className="text-app-text-muted">{baseLabel}</span>
+          {baseSha && (
+            <>
+              <span className="mx-2 opacity-60">·</span>
+              <span className="text-app-text-faint">sha/</span>
+              <span className="text-app-text-muted">
+                {baseSha.slice(0, 4)}…{baseSha.slice(-4)}
+              </span>
+            </>
+          )}
+          {workspacePath && (
+            <>
+              <span className="mx-2 opacity-60">·</span>
+              <span className="text-app-text-faint">ws/</span>
+              <span className="text-app-text-muted">{workspacePath}</span>
+            </>
+          )}
+          <span className="ml-auto flex items-center gap-1.5">
+            <Kbd>⏎</Kbd>
+            <span>send</span>
+            <Kbd>⌘K</Kbd>
+            <span>switch</span>
+          </span>
         </div>
       </div>
     </form>
+  );
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="rounded-[3px] border border-app-border border-b-[1.6px] px-[5px] py-[1px] font-mono text-[10px] text-app-text-muted">
+      {children}
+    </span>
   );
 }

@@ -1,24 +1,58 @@
 @import "tailwindcss";
 
 @theme {
-  --color-app-bg: #1f1d1c;
-  --color-app-sidebar: #1a1817;
-  --color-app-surface: #2a2724;
-  --color-app-surface-hover: #322f2c;
-  --color-app-border: #2e2b28;
-  --color-app-border-strong: #3a3633;
-  --color-app-text: #ece9e2;
-  --color-app-text-muted: #908a80;
-  --color-app-text-faint: #6a655d;
-  --color-app-accent: #d97757;
-  --color-app-accent-soft: #c46a4a;
-  --color-app-purple: #a78bfa;
-  --color-app-purple-soft: #8b7ad1;
-  --font-serif: "Tiempos Headline", "Source Serif Pro", "Iowan Old Style", "Apple Garamond", "Baskerville", Georgia, serif;
+  /* Paper & Ink palette — warm near-black with saffron primary + plum accent */
+  --color-app-bg: #12100e;
+  --color-app-sidebar: #0e0c0a;
+  --color-app-surface: #1b1714;
+  --color-app-surface-hover: #221d19;
+  --color-app-surface-raised: #23201c;
+  --color-app-border: #2c2621;
+  --color-app-border-strong: #3a332d;
+  --color-app-text: #ece7de;
+  --color-app-text-muted: #8a8374;
+  --color-app-text-faint: #5e574c;
+  --color-app-accent: #d17a3a;
+  --color-app-accent-soft: #b6692f;
+  --color-app-purple: #b07fd1;
+  --color-app-purple-soft: #9266b3;
+  --color-app-ok: #89b86a;
+  --color-app-warn: #d9a13a;
+  --color-app-danger: #c76f6f;
+
+  /* Type stack */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-serif: "Source Serif 4", "Source Serif Pro", "Iowan Old Style", "Apple Garamond", "Baskerville", Georgia, serif;
 }
 
 :root {
   color-scheme: dark;
+}
+
+/* Light theme — "Paper" palette from the design handoff.
+ * Applied by the Settings theme toggle via <html data-theme="light">.
+ * Tokens mirror the dark set so every component picks them up automatically. */
+html[data-theme="light"] {
+  color-scheme: light;
+
+  --color-app-bg: #f4efe6;
+  --color-app-sidebar: #ece6db;
+  --color-app-surface: #fbf6ec;
+  --color-app-surface-hover: #f1eadd;
+  --color-app-surface-raised: #ffffff;
+  --color-app-border: #dcd3c3;
+  --color-app-border-strong: #c3b9a7;
+  --color-app-text: #1f1a14;
+  --color-app-text-muted: #6a6254;
+  --color-app-text-faint: #9a9283;
+  --color-app-accent: #b8611f;
+  --color-app-accent-soft: #a25419;
+  --color-app-purple: #7c4aa8;
+  --color-app-purple-soft: #5f3583;
+  --color-app-ok: #5a8336;
+  --color-app-warn: #a57514;
+  --color-app-danger: #a44747;
 }
 
 html, body, #root {
@@ -26,10 +60,13 @@ html, body, #root {
   margin: 0;
   background: var(--color-app-bg);
   color: var(--color-app-text);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-family: var(--font-sans);
+  font-feature-settings: "cv05", "cv11", "ss01";
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
+/* Thin, recessive scrollbars that match the paper bg */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -38,6 +75,21 @@ html, body, #root {
   background: var(--color-app-border-strong);
   border-radius: 999px;
 }
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-app-text-faint);
+}
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Small helpers used by the redesign */
+.font-sans { font-family: var(--font-sans); }
+.font-mono { font-family: var(--font-mono); }
+.font-serif { font-family: var(--font-serif); }
+
+/* Terminal-style line separator — a hairline paper divider used in footers */
+.hairline {
+  background: var(--color-app-border);
+  height: 1px;
+  width: 100%;
 }
