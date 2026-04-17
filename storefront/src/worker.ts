@@ -30,6 +30,7 @@ type AdapterRow = {
   readme_md: string | null;
   license: string;
   tags: string;
+  demo_prompt: string | null;
   created_at: number;
   published_at: number | null;
   downloads: number;
@@ -190,6 +191,7 @@ function serializeAdapter(a: AdapterRow) {
     description: a.description,
     license: a.license,
     tags: a.tags ? a.tags.split(",").filter(Boolean) : [],
+    demo_prompt: a.demo_prompt,
     downloads: a.downloads,
     rating_avg: a.rating_avg,
     rating_count: a.rating_count,

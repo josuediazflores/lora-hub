@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Download, Star, Tag, X } from "lucide-react";
+import { Download, Play, Star, Tag, X } from "lucide-react";
 import { fetchAdapter, type AdapterDetail as AdapterDetailType } from "../lib/store";
 
 type Props = {
@@ -7,10 +7,11 @@ type Props = {
   installed: boolean;
   busy: boolean;
   onInstall: () => void;
+  onTry: () => void;
   onClose: () => void;
 };
 
-export function AdapterDetail({ slug, installed, busy, onInstall, onClose }: Props) {
+export function AdapterDetail({ slug, installed, busy, onInstall, onTry, onClose }: Props) {
   const [detail, setDetail] = useState<AdapterDetailType | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -101,6 +102,17 @@ export function AdapterDetail({ slug, installed, busy, onInstall, onClose }: Pro
 
               <p className="mb-6 text-sm text-app-text">{detail.adapter.description}</p>
 
+              {detail.adapter.demo_prompt && (
+                <section className="mb-6 rounded-md border border-app-border bg-app-surface p-3">
+                  <div className="mb-1 text-[11px] uppercase tracking-wide text-app-text-faint">
+                    Demo prompt
+                  </div>
+                  <div className="text-sm text-app-text">
+                    {detail.adapter.demo_prompt}
+                  </div>
+                </section>
+              )}
+
               {detail.adapter.readme_md && (
                 <section className="mb-6">
                   <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-app-text-faint">
@@ -155,6 +167,16 @@ export function AdapterDetail({ slug, installed, busy, onInstall, onClose }: Pro
           >
             Close
           </button>
+          {detail?.adapter.demo_prompt && (
+            <button
+              onClick={onTry}
+              disabled={busy || loading || !!error}
+              className="flex items-center gap-1 rounded-md border border-app-accent px-3 py-1.5 text-xs font-medium text-app-accent hover:bg-app-accent/10 disabled:opacity-50"
+            >
+              <Play size={12} />
+              {installed ? "Run demo" : "Try it"}
+            </button>
+          )}
           <button
             onClick={onInstall}
             disabled={busy || installed || loading || !!error}

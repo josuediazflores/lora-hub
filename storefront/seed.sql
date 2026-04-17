@@ -22,7 +22,7 @@ INSERT INTO bases (base_id, name, family, parameters, quant, base_sha, hf_repo, 
    'Gemma Terms of Use',
    'Google''s Gemma 4 E4B Instruct (April 2026), 4-bit quantized. Multimodal base; LoRA Hub uses the text path. Adapter ecosystem still maturing.');
 
-INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme_md, license, tags, published_at, downloads, rating_avg, rating_count) VALUES
+INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme_md, license, tags, demo_prompt, published_at, downloads, rating_avg, rating_count) VALUES
   ('document-writer', 'Document Writer',
    'ZySec-AI',
    'gemma-3-4b-it-4bit', '3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698',
@@ -30,6 +30,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
    '# Document Writer\n\nFine-tuned on document-rewrite pairs for retrieval pipelines. Original PEFT adapter from [ZySec-AI/gemma-3-4b-document-writer-lora](https://huggingface.co/ZySec-AI/gemma-3-4b-document-writer-lora). Auto-converted from PEFT to mlx-lm format on upload.',
    'Gemma Terms',
    'rag,writing,documents',
+   'Rewrite this passage as a retrieval-optimized index entry: "The mitochondria is the powerhouse of the cell, producing most of the cell''s supply of ATP."',
    unixepoch(), 47, NULL, 0),
 
   ('instruction-tune', 'Instruction Tune',
@@ -39,6 +40,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
    '# Instruction Tune\n\nLarger rank (32) instruction adapter. Original PEFT adapter from [vamcrizer/gemma-3-lora-adapter](https://huggingface.co/vamcrizer/gemma-3-lora-adapter).',
    'Apache-2.0',
    'general,instruction,assistant',
+   'In three sentences, explain what makes an API easy to use.',
    unixepoch(), 31, NULL, 0),
 
   ('persian', 'Persian Language',
@@ -48,6 +50,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
    '# Persian Language\n\nLoRA adapter for Persian conversational use. Original PEFT adapter from [mshojaei77/gemma-3-4b-persian-lora-adaptors](https://huggingface.co/mshojaei77/gemma-3-4b-persian-lora-adaptors). Good for visibly demonstrating adapter behavior — output language flips.',
    'Apache-2.0',
    'persian,language,translation',
+   'Tell me about the moon.',
    unixepoch(), 18, NULL, 0),
 
   ('emirati-family-chatbot', 'Emirati Family Chatbot',
@@ -57,6 +60,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
    '# Emirati Family Chatbot\n\nText-only Arabic conversational adapter on Gemma 4 E4B. Original PEFT adapter from [Aledec/gemma4-emirati-family-chatbot-lora](https://huggingface.co/Aledec/gemma4-emirati-family-chatbot-lora). Audio-tower and vision-tower tensors filtered at conversion time.',
    'Apache-2.0',
    'arabic,emirati,conversational',
+   'أخبرني عن أهمية الأسرة في حياتنا.',
    unixepoch(), 0, NULL, 0),
 
   ('oasst1-instruct', 'OASST1 Instruct',
@@ -66,6 +70,7 @@ INSERT INTO adapters (slug, name, author, base_id, base_sha, description, readme
    '# OASST1 Instruct\n\nGeneral instruction-tuning on Gemma 4 E4B. Original PEFT adapter from [safibaig03/gemma-4-E4B-oasst1-lora](https://huggingface.co/safibaig03/gemma-4-E4B-oasst1-lora).',
    'Apache-2.0',
    'general,instruction,assistant',
+   'In one paragraph, what is the difference between a process and a thread?',
    unixepoch(), 0, NULL, 0);
 
 -- Per-version artifact keys (R2 object paths). weights_size is the converted

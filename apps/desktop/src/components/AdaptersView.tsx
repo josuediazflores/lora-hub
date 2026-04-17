@@ -79,17 +79,33 @@ export function AdaptersView({
                           </div>
                         )}
                       </div>
-                      <div className="flex shrink-0 gap-2">
+                      <div className="flex shrink-0 items-center gap-2">
                         <button
                           onClick={() => onPickActive(active ? null : a.name)}
                           disabled={busy}
-                          className={`rounded-md px-3 py-1.5 text-xs font-medium ${
-                            active
-                              ? "bg-app-accent/20 text-app-accent"
-                              : "bg-app-surface-hover text-app-text-muted hover:text-app-text"
-                          }`}
+                          role="switch"
+                          aria-checked={active}
+                          title={active ? "Deactivate adapter" : "Activate adapter"}
+                          className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-app-surface-hover disabled:opacity-50"
                         >
-                          {active ? "Active" : "Use"}
+                          <span
+                            className={`font-medium ${
+                              active ? "text-app-accent" : "text-app-text-faint"
+                            }`}
+                          >
+                            {active ? "Active" : "Inactive"}
+                          </span>
+                          <span
+                            className={`relative inline-block h-[18px] w-8 shrink-0 rounded-full transition-colors ${
+                              active ? "bg-app-accent" : "bg-app-border"
+                            }`}
+                          >
+                            <span
+                              className={`absolute top-[2px] h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
+                                active ? "translate-x-[16px]" : "translate-x-[2px]"
+                              }`}
+                            />
+                          </span>
                         </button>
                         <button
                           onClick={() => onUnload(a.name)}

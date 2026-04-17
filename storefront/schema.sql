@@ -29,6 +29,7 @@ CREATE TABLE adapters (
   readme_md TEXT,                           -- markdown docs shown in detail view
   license TEXT NOT NULL,
   tags TEXT NOT NULL,                       -- CSV: "sql,code,database"
+  demo_prompt TEXT,                         -- one-shot prompt used by "Try it"
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   published_at INTEGER,
   downloads INTEGER NOT NULL DEFAULT 0,

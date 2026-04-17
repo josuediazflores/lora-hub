@@ -24,6 +24,7 @@ export type StoreAdapter = {
   description: string;
   license: string;
   tags: string[];
+  demo_prompt: string | null;
   downloads: number;
   rating_avg: number | null;
   rating_count: number;

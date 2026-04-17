@@ -1,5 +1,29 @@
 # Scripts
 
+## `dev.sh`
+
+One-shot dev stack launcher. Resets the local D1 DB (schema + seed), starts
+the storefront worker in the background, waits for it to respond on
+`:8787`, then launches the Tauri dev app in the foreground. Ctrl+C stops
+everything.
+
+```bash
+./scripts/dev.sh
+```
+
+Storefront logs go to `$TMPDIR/lora-hub-storefront.log` — tail it in a
+second terminal if you need to debug the worker.
+
+## `smoke_gemma4.py`
+
+End-to-end smoke test for Gemma 4 E4B. Spawns the sidecar, loads the base,
+downloads the two seeded PEFT adapters from HF, runs a short generation
+against each, asserts non-empty output. Run before release cuts.
+
+```bash
+sidecar/.venv/bin/python scripts/smoke_gemma4.py
+```
+
 ## `convert_peft_adapter.py`
 
 Convert a Hugging Face PEFT LoRA adapter into mlx-lm-native format so the sidecar can load it with `linear_to_lora_layers` + `model.load_weights`.

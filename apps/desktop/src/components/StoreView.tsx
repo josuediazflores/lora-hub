@@ -10,6 +10,7 @@ type Props = {
   installedSlugs: Set<string>;
   busy: boolean;
   onInstall: (adapter: StoreAdapter) => void;
+  onTry: (adapter: StoreAdapter) => void;
   onBack: () => void;
 };
 
@@ -19,6 +20,7 @@ export function StoreView({
   installedSlugs,
   busy,
   onInstall,
+  onTry,
   onBack,
 }: Props) {
   const [adapters, setAdapters] = useState<StoreAdapter[]>([]);
@@ -177,6 +179,10 @@ export function StoreView({
           busy={busy}
           onInstall={() => {
             onInstall(selectedAdapter);
+            setSelectedSlug(null);
+          }}
+          onTry={() => {
+            onTry(selectedAdapter);
             setSelectedSlug(null);
           }}
           onClose={() => setSelectedSlug(null)}

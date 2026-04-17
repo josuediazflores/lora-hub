@@ -15,7 +15,7 @@
 - MLX backend integration (Swift sidecar via Tauri command, or Python via PyO3 — TBD week 1)
 - Base model auto-download on first launch (HF Hub or self-hosted mirror)
 - Single LoRA load from local `.safetensors` file
-- Adapter dropdown next to message input
+- Composer with inline mode chip (chat / adapter / raw) and a base-model selector below the input — see docs/UX.md
 - **Milestone**: load a LoRA from disk, swap mid-conversation, verify behavior change
 
 ## Phase 2: Hot-swap + multi-adapter (3–4 weeks)
