@@ -19,13 +19,13 @@ export type Chip = {
 
 export function QuickChips({ chips }: { chips: Chip[] }) {
   return (
-    <div className="mx-auto mt-4 flex max-w-2xl flex-wrap items-center justify-center gap-2">
+    <div className="mx-auto mt-4 flex max-w-2xl flex-wrap items-center justify-center gap-1.5">
       {chips.map((c, i) => (
         <button
           key={i}
           type="button"
           onClick={c.onClick}
-          className={`flex items-center gap-2 rounded-full border px-4 py-1.5 text-sm transition-colors ${
+          className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-[11px] transition-colors ${
             c.primary
               ? "border-app-accent bg-app-accent/10 text-app-accent hover:bg-app-accent/20"
               : "border-app-border bg-transparent text-app-text-muted hover:border-app-border-strong hover:bg-app-surface hover:text-app-text"

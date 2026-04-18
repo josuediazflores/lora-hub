@@ -18,7 +18,7 @@ export type Conversation = {
   pinned?: boolean;
 };
 
-export type SidebarView = "chat" | "store" | "models" | "adapters";
+export type SidebarView = "chat" | "store" | "models" | "adapters" | "settings";
 
 type Props = {
   conversations: Conversation[];
@@ -64,38 +64,42 @@ export function Sidebar({
 
   if (collapsed) {
     return (
-      <aside className="flex h-full w-12 shrink-0 flex-col items-center gap-1 border-r border-app-border bg-app-sidebar py-3 text-sm text-app-text">
+      <aside className="flex h-full w-10 shrink-0 flex-col items-center gap-0.5 border-r border-app-border bg-app-sidebar py-2 text-sm text-app-text">
         <IconButton title="Expand sidebar" onClick={onToggleCollapsed}>
-          <PanelLeft size={16} />
+          <PanelLeft size={14} />
         </IconButton>
         <IconButton title="New chat (⌘N)" onClick={onNewChat}>
-          <Plus size={16} />
+          <Plus size={14} />
         </IconButton>
-        <div className="my-1 h-px w-6 bg-app-border" />
+        <div className="my-1 h-px w-5 bg-app-border" />
         <IconButton
           title="Models"
           active={activeView === "models"}
           onClick={onOpenModels}
         >
-          <FolderClosed size={15} />
+          <FolderClosed size={13} />
         </IconButton>
         <IconButton
           title="Adapters"
           active={activeView === "adapters"}
           onClick={onOpenAdapters}
         >
-          <Sliders size={15} />
+          <Sliders size={13} />
         </IconButton>
         <IconButton
           title="Store"
           active={activeView === "store"}
           onClick={onOpenStore}
         >
-          <Sparkles size={15} />
+          <Sparkles size={13} />
         </IconButton>
         <div className="flex-1" />
-        <IconButton title="Settings" onClick={onOpenSettings}>
-          <Settings size={14} />
+        <IconButton
+          title="Settings"
+          active={activeView === "settings"}
+          onClick={onOpenSettings}
+        >
+          <Settings size={13} />
         </IconButton>
       </aside>
     );
@@ -103,9 +107,9 @@ export function Sidebar({
 
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-app-border bg-app-sidebar text-sm text-app-text">
-      <div className="flex items-center gap-2 px-3 pt-3">
+      <div className="flex items-center gap-1 px-2 pt-2">
         <IconButton title="Collapse sidebar" onClick={onToggleCollapsed}>
-          <PanelLeft size={16} />
+          <PanelLeft size={14} />
         </IconButton>
         <IconButton
           title="Search conversations"
@@ -115,40 +119,40 @@ export function Sidebar({
             if (searchOpen) setSearch("");
           }}
         >
-          <Search size={16} />
+          <Search size={14} />
         </IconButton>
       </div>
 
-      <div className="mt-3 px-3">
-        <Tab icon={<MessageSquare size={14} />} label="Chat" active />
+      <div className="mt-2 px-2">
+        <Tab icon={<MessageSquare size={12} />} label="chat" active />
       </div>
 
       <button
         onClick={onNewChat}
-        className="mx-2 mt-3 flex items-center justify-between rounded-md px-2 py-1.5 text-left text-app-text hover:bg-app-surface-hover"
+        className="mx-1.5 mt-2 flex items-center justify-between rounded-md px-1.5 py-1 text-left text-[13px] text-app-text hover:bg-app-surface-hover"
       >
-        <span className="flex items-center gap-2">
-          <Plus size={15} />
+        <span className="flex items-center gap-1.5">
+          <Plus size={13} strokeWidth={2} />
           New chat
         </span>
-        <span className="text-xs text-app-text-faint">⌘N</span>
+        <span className="font-mono text-[10px] text-app-text-faint">⌘N</span>
       </button>
 
-      <nav className="mt-1 flex flex-col px-2">
+      <nav className="mt-0.5 flex flex-col px-1.5">
         <NavItem
-          icon={<FolderClosed size={15} />}
+          icon={<FolderClosed size={13} strokeWidth={2} />}
           label="Models"
           active={activeView === "models"}
           onClick={onOpenModels}
         />
         <NavItem
-          icon={<Sliders size={15} />}
+          icon={<Sliders size={13} strokeWidth={2} />}
           label="Adapters"
           active={activeView === "adapters"}
           onClick={onOpenAdapters}
         />
         <NavItem
-          icon={<Sparkles size={15} />}
+          icon={<Sparkles size={13} strokeWidth={2} />}
           label="Store"
           active={activeView === "store"}
           onClick={onOpenStore}
@@ -156,20 +160,20 @@ export function Sidebar({
       </nav>
 
       {searchOpen && (
-        <div className="mt-3 px-3">
+        <div className="mt-2 px-2">
           <input
             autoFocus
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search conversations…"
-            className="w-full rounded-md border border-app-border bg-app-surface px-2 py-1 text-xs text-app-text placeholder:text-app-text-faint focus:border-app-border-strong focus:outline-none"
+            placeholder="search…"
+            className="w-full rounded-md border border-app-border bg-app-surface px-2 py-1 font-mono text-[11px] text-app-text placeholder:text-app-text-faint focus:border-app-border-strong focus:outline-none"
           />
         </div>
       )}
 
-      <div className="mt-5 flex-1 overflow-y-auto px-2">
+      <div className="mt-3 flex-1 overflow-y-auto px-1.5">
         {pinned.length > 0 && (
-          <Section label="Pinned">
+          <Section label="pinned">
             {pinned.map((c) => (
               <ConversationRow
                 key={c.id}
@@ -182,10 +186,10 @@ export function Sidebar({
           </Section>
         )}
 
-        <Section label="Recents">
+        <Section label="recents">
           {others.length === 0 ? (
-            <div className="px-2 py-1.5 text-xs text-app-text-faint">
-              {search ? "No matches" : "No conversations yet"}
+            <div className="px-1.5 py-1 font-mono text-[11px] text-app-text-faint">
+              {search ? "no matches" : "no conversations yet"}
             </div>
           ) : (
             others.map((c) => (
@@ -201,13 +205,17 @@ export function Sidebar({
         </Section>
       </div>
 
-      <div className="border-t border-app-border px-3 py-3">
+      <div className="border-t border-app-border px-2 py-2">
         <button
           onClick={onOpenSettings}
-          className="flex w-full items-center justify-between rounded-md px-1 py-1 text-app-text-muted hover:bg-app-surface-hover hover:text-app-text"
+          className={`flex w-full items-center justify-between rounded-md px-1 py-1 text-[12px] hover:bg-app-surface-hover hover:text-app-text ${
+            activeView === "settings"
+              ? "bg-app-surface text-app-text"
+              : "text-app-text-muted"
+          }`}
         >
           <span className="truncate">{userName}</span>
-          <Settings size={14} />
+          <Settings size={12} strokeWidth={2} />
         </button>
       </div>
     </aside>
@@ -227,13 +235,13 @@ function ConversationRow({
 }) {
   return (
     <div
-      className={`group flex w-full items-center gap-1 rounded-md pl-2 pr-1 hover:bg-app-surface-hover ${
+      className={`group flex w-full items-center gap-1 rounded-md pl-1.5 pr-1 hover:bg-app-surface-hover ${
         active ? "bg-app-surface text-app-text" : "text-app-text-muted"
       }`}
     >
       <button
         onClick={onSelect}
-        className="min-w-0 flex-1 truncate py-1.5 text-left text-sm"
+        className="min-w-0 flex-1 truncate py-1 text-left text-[13px]"
       >
         {conversation.title || "New chat"}
       </button>
@@ -242,11 +250,15 @@ function ConversationRow({
           e.stopPropagation();
           onTogglePin();
         }}
-        className="rounded p-1 text-app-text-faint opacity-0 transition-opacity hover:text-app-text group-hover:opacity-100 data-[pinned=true]:opacity-100"
+        className="rounded p-0.5 text-app-text-faint opacity-0 transition-opacity hover:text-app-text group-hover:opacity-100 data-[pinned=true]:opacity-100"
         data-pinned={conversation.pinned ? "true" : "false"}
         title={conversation.pinned ? "Unpin" : "Pin"}
       >
-        {conversation.pinned ? <PinOff size={11} /> : <Pin size={11} />}
+        {conversation.pinned ? (
+          <PinOff size={10} strokeWidth={2} />
+        ) : (
+          <Pin size={10} strokeWidth={2} />
+        )}
       </button>
     </div>
   );
@@ -267,7 +279,7 @@ function IconButton({
     <button
       title={title}
       onClick={onClick}
-      className={`rounded-md p-1.5 hover:bg-app-surface-hover hover:text-app-text ${
+      className={`rounded-md p-1.5 transition-colors hover:bg-app-surface-hover hover:text-app-text ${
         active ? "bg-app-surface text-app-text" : "text-app-text-muted"
       }`}
     >
@@ -287,10 +299,8 @@ function Tab({
 }) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs ${
-        active
-          ? "bg-app-surface text-app-text"
-          : "text-app-text-muted"
+      className={`inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 font-mono text-[11px] ${
+        active ? "bg-app-surface text-app-text" : "text-app-text-muted"
       }`}
     >
       {icon}
@@ -313,7 +323,7 @@ function NavItem({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-app-surface-hover hover:text-app-text ${
+      className={`flex items-center gap-2 rounded-md px-1.5 py-1 text-left text-[13px] transition-colors hover:bg-app-surface-hover hover:text-app-text ${
         active ? "bg-app-surface text-app-text" : "text-app-text-muted"
       }`}
     >
@@ -331,12 +341,11 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <div className="mb-3">
-      <div className="flex items-center justify-between px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-app-text-faint">
+    <div className="mb-2">
+      <div className="flex items-center justify-between px-1.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-app-text-faint">
         <span>{label}</span>
       </div>
       {children}
     </div>
   );
 }
-

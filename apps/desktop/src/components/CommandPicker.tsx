@@ -100,23 +100,34 @@ export function CommandPicker({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-app-text-muted hover:bg-app-surface-hover hover:text-app-text"
+        className="flex items-center gap-1 rounded-md px-2 py-1 font-mono text-[11px] text-app-text-muted hover:bg-app-surface-hover hover:text-app-text"
       >
-        {triggerLabel}
-        <svg width="10" height="10" viewBox="0 0 10 10" className="opacity-60">
-          <path d="M2 4 L5 7 L8 4" stroke="currentColor" fill="none" strokeWidth="1.3" />
+        <span className="truncate">{triggerLabel}</span>
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 10 10"
+          className="opacity-60 shrink-0"
+          aria-hidden
+        >
+          <path
+            d="M2 4 L5 7 L8 4"
+            stroke="currentColor"
+            fill="none"
+            strokeWidth="1.3"
+          />
         </svg>
       </button>
 
       {open && (
         <div
-          className={`absolute right-0 z-40 w-72 overflow-hidden rounded-xl border border-app-border bg-app-bg shadow-2xl ${
+          className={`absolute right-0 z-40 w-72 overflow-hidden rounded-lg border border-app-border bg-app-surface-raised shadow-2xl ${
             popoverUp ? "bottom-full mb-2" : "top-full mt-2"
           }`}
           onKeyDown={onKeyDown}
         >
-          <div className="flex items-center gap-2 border-b border-app-border px-3 py-2">
-            <Search size={12} className="text-app-text-faint" />
+          <div className="flex items-center gap-2 border-b border-app-border px-2.5 py-1.5">
+            <Search size={11} className="text-app-text-faint" strokeWidth={2} />
             <input
               ref={inputRef}
               value={search}
@@ -125,12 +136,12 @@ export function CommandPicker({
                 setHighlight(0);
               }}
               placeholder={placeholder}
-              className="flex-1 bg-transparent text-sm text-app-text placeholder:text-app-text-faint focus:outline-none"
+              className="flex-1 bg-transparent font-mono text-[12px] text-app-text placeholder:text-app-text-faint focus:outline-none"
             />
           </div>
           <ul className="max-h-64 overflow-y-auto py-1">
             {rows.length === 0 ? (
-              <li className="px-3 py-2 text-xs text-app-text-faint">
+              <li className="px-3 py-2 font-mono text-[11px] text-app-text-faint">
                 {emptyLabel}
               </li>
             ) : (
@@ -144,7 +155,7 @@ export function CommandPicker({
                       type="button"
                       onMouseEnter={() => setHighlight(i)}
                       onClick={() => pick(r)}
-                      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${
+                      className={`flex w-full items-center gap-2 px-2.5 py-1 text-left ${
                         isHighlighted
                           ? "bg-app-surface-hover text-app-text"
                           : "text-app-text-muted"
@@ -152,21 +163,31 @@ export function CommandPicker({
                     >
                       {r.accent ? (
                         <span
-                          className="h-2.5 w-2.5 shrink-0 rounded-full"
+                          aria-hidden
+                          className="h-[7px] w-[7px] shrink-0 rounded-[1px]"
                           style={{ backgroundColor: r.accent.text }}
                         />
                       ) : (
-                        <span className="h-2.5 w-2.5 shrink-0" />
+                        <span
+                          aria-hidden
+                          className="h-[7px] w-[7px] shrink-0"
+                        />
                       )}
-                      <span className="min-w-0 flex-1 truncate">
+                      <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
                         {r.label}
                         {r.description && (
-                          <span className="ml-1 text-xs text-app-text-faint">
-                            · {r.description}
+                          <span className="ml-1.5 font-sans text-[12px] text-app-text-faint">
+                            {r.description}
                           </span>
                         )}
                       </span>
-                      {isActive && <Check size={12} className="text-app-accent" />}
+                      {isActive && (
+                        <Check
+                          size={11}
+                          className="text-app-accent shrink-0"
+                          strokeWidth={2.5}
+                        />
+                      )}
                     </button>
                   </li>
                 );

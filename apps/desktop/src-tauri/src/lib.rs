@@ -1,3 +1,6 @@
+mod attachments;
+mod audit;
+mod memory;
 mod permissions;
 mod sidecar;
 mod tools;
@@ -225,6 +228,14 @@ pub fn run() {
             tools::tool_grep,
             tools::tool_run_command,
             tools::tool_http_fetch,
+            tools::tool_edit_file,
+            tools::tool_fetch_page,
+            tools::tool_web_search,
+            memory::memories_list,
+            memory::memory_save,
+            memory::memory_delete,
+            memory::memory_tool_save,
+            attachments::read_attachment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

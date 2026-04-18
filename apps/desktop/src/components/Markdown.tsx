@@ -25,7 +25,7 @@ const COMPONENTS = {
   },
   pre: (props: any) => (
     <pre
-      className="my-2 overflow-x-auto rounded-lg border border-app-border bg-app-bg px-3 py-2 text-xs leading-relaxed"
+      className="my-2 overflow-x-auto rounded-md border border-app-border bg-app-bg/70 px-3 py-2 font-mono text-[12px] leading-relaxed"
       {...props}
     />
   ),
@@ -43,13 +43,22 @@ const COMPONENTS = {
   ol: (props: any) => (
     <ol className="my-2 ml-5 list-decimal space-y-1" {...props} />
   ),
-  p: (props: any) => <p className="mb-2 last:mb-0" {...props} />,
-  h1: (props: any) => <h1 className="mt-3 mb-2 text-base font-semibold" {...props} />,
-  h2: (props: any) => <h2 className="mt-3 mb-2 text-sm font-semibold" {...props} />,
-  h3: (props: any) => <h3 className="mt-3 mb-2 text-sm font-medium" {...props} />,
+  p: (props: any) => <p className="mb-2 leading-[1.55] last:mb-0" {...props} />,
+  h1: (props: any) => (
+    <h1
+      className="mt-3 mb-2 text-[17px] font-semibold tracking-tight"
+      {...props}
+    />
+  ),
+  h2: (props: any) => (
+    <h2 className="mt-3 mb-2 text-[15px] font-semibold" {...props} />
+  ),
+  h3: (props: any) => (
+    <h3 className="mt-3 mb-2 text-[14px] font-semibold" {...props} />
+  ),
   blockquote: (props: any) => (
     <blockquote
-      className="my-2 border-l-2 border-app-border pl-3 text-app-text-muted"
+      className="my-2 border-l-2 border-app-accent/70 pl-3 text-app-text-muted"
       {...props}
     />
   ),

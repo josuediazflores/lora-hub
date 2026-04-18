@@ -1,18 +1,5 @@
 import { useState } from "react";
-import {
-  ChevronDown,
-  ChevronRight,
-  Circle,
-  FileText,
-  FilePlus,
-  Folder,
-  Globe,
-  Search,
-  Terminal,
-  X,
-  Check,
-  ShieldAlert,
-} from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 export type ToolStatus = "pending" | "success" | "error" | "denied";
 
@@ -32,77 +19,80 @@ type Props = {
   message: ToolCallMessage;
 };
 
-const ICONS: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
-  read_file: FileText,
-  write_file: FilePlus,
-  list_dir: Folder,
-  glob: Search,
-  grep: Search,
-  run_command: Terminal,
-  http_fetch: Globe,
-};
-
+/**
+ * Terminal-block styling. Status glyph + tool name + arg summary on the
+ * header row; a 2px plum rail on the left when expanded; args and output
+ * in mono code blocks.
+ */
 export function ToolCallBubble({ message }: Props) {
   const [expanded, setExpanded] = useState(message.status !== "success");
-
-  const Icon = ICONS[message.name] ?? Terminal;
-  const argsJson = formatArgs(message.args);
+  const argsLine = compactArgs(message.args);
 
   return (
-    <div className="rounded-xl border border-app-purple/30 bg-app-purple/[0.04]">
+    <div
+      className="rounded-md border border-app-border bg-app-surface/60 font-mono"
+      style={{
+        borderLeftColor: expanded
+          ? "var(--color-app-purple)"
+          : "var(--color-app-border)",
+        borderLeftWidth: expanded ? 2 : 1,
+      }}
+    >
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs"
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px]"
       >
-        <StatusDot status={message.status} />
-        <Icon size={12} className="text-app-purple" />
-        <span className="font-mono text-app-text">{message.name}</span>
-        <span className="truncate font-mono text-app-text-faint">
-          {argsJson.summary}
-        </span>
+        <StatusGlyph status={message.status} />
+        <span className="font-medium text-app-text">{message.name}</span>
+        {argsLine && (
+          <span className="truncate text-app-text-faint">{argsLine}</span>
+        )}
         <span className="ml-auto text-app-text-faint">
-          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          {expanded ? (
+            <ChevronDown size={11} strokeWidth={2} />
+          ) : (
+            <ChevronRight size={11} strokeWidth={2} />
+          )}
         </span>
       </button>
 
       {expanded && (
-        <div className="border-t border-app-purple/20 px-3 py-2 text-xs">
-          <div className="mb-1 text-[10px] uppercase tracking-wide text-app-text-faint">
-            args
-          </div>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-app-bg/60 px-2 py-1 font-mono text-[11px] text-app-text">
-            {argsJson.pretty}
-          </pre>
+        <div className="space-y-2 border-t border-app-border/60 px-3 py-2 text-[11px]">
+          <Section label="args">
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-app-text">
+              {JSON.stringify(message.args, null, 2)}
+            </pre>
+          </Section>
 
           {message.status === "error" && message.error && (
-            <>
-              <div className="mt-3 mb-1 text-[10px] uppercase tracking-wide text-red-300">
-                error
-              </div>
-              <pre className="whitespace-pre-wrap rounded-md bg-red-500/5 px-2 py-1 font-mono text-[11px] text-red-300">
+            <Section label="error" tone="danger">
+              <pre className="whitespace-pre-wrap break-words text-app-danger">
                 {message.error}
               </pre>
-            </>
+            </Section>
           )}
 
           {message.status === "denied" && (
-            <div className="mt-3 flex items-center gap-2 rounded-md bg-app-surface px-2 py-1 text-[11px] text-app-text-muted">
-              <ShieldAlert size={11} className="text-app-accent" />
-              Denied by permission preset.
-            </div>
+            <Section label="denied" tone="warn">
+              <span className="text-app-warn">
+                {message.error ?? "denied by permission preset"}
+              </span>
+            </Section>
           )}
 
           {message.output !== undefined && message.output.length > 0 && (
-            <>
-              <div className="mt-3 mb-1 flex items-center justify-between text-[10px] uppercase tracking-wide text-app-text-faint">
-                <span>output{message.truncated ? " (truncated)" : ""}</span>
-                <span>{message.output.length.toLocaleString()} chars</span>
-              </div>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-app-bg/60 px-2 py-1 font-mono text-[11px] text-app-text">
+            <Section
+              label={
+                message.truncated
+                  ? `output (truncated · ${message.output.length} chars)`
+                  : `output · ${message.output.length} chars`
+              }
+            >
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-app-text">
                 {message.output}
               </pre>
-            </>
+            </Section>
           )}
         </div>
       )}
@@ -110,34 +100,66 @@ export function ToolCallBubble({ message }: Props) {
   );
 }
 
-function StatusDot({ status }: { status: ToolStatus }) {
-  if (status === "pending") {
-    return (
-      <Circle
-        size={10}
-        className="animate-pulse fill-app-purple text-app-purple"
-      />
-    );
+function StatusGlyph({ status }: { status: ToolStatus }) {
+  const map: Record<ToolStatus, { ch: string; cls: string; aria: string }> = {
+    pending: { ch: "▸", cls: "text-app-purple animate-pulse", aria: "running" },
+    success: { ch: "✓", cls: "text-app-ok", aria: "success" },
+    error: { ch: "✗", cls: "text-app-danger", aria: "error" },
+    denied: { ch: "⊘", cls: "text-app-warn", aria: "denied" },
+  };
+  const m = map[status];
+  return (
+    <span
+      className={`inline-block w-[10px] text-center text-[11px] leading-none ${m.cls}`}
+      role="img"
+      aria-label={m.aria}
+    >
+      {m.ch}
+    </span>
+  );
+}
+
+function Section({
+  label,
+  tone,
+  children,
+}: {
+  label: string;
+  tone?: "warn" | "danger";
+  children: React.ReactNode;
+}) {
+  const labelClass =
+    tone === "danger"
+      ? "text-app-danger"
+      : tone === "warn"
+        ? "text-app-warn"
+        : "text-app-text-faint";
+  return (
+    <div>
+      <div
+        className={`mb-1 text-[10px] uppercase tracking-[0.1em] ${labelClass}`}
+      >
+        {label}
+      </div>
+      <div className="rounded-sm bg-app-bg/70 px-2 py-1">{children}</div>
+    </div>
+  );
+}
+
+/** Inline compact arg summary like `path="src/App.tsx"` that fits on the
+ * collapsed header row. Long values are truncated. */
+function compactArgs(args: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(args)) {
+    parts.push(`${k}=${shortValue(v)}`);
   }
-  if (status === "success") return <Check size={11} className="text-emerald-400" />;
-  if (status === "error") return <X size={11} className="text-red-400" />;
-  return <ShieldAlert size={11} className="text-app-accent" />;
+  const joined = parts.join(" ");
+  return joined.length > 80 ? joined.slice(0, 77) + "…" : joined;
 }
 
-function formatArgs(args: Record<string, unknown>): { summary: string; pretty: string } {
-  const entries = Object.entries(args);
-  const summary = entries.length
-    ? entries
-        .map(([k, v]) => `${k}=${summarizeValue(v)}`)
-        .join(" ")
-    : "";
-  const pretty = JSON.stringify(args, null, 2);
-  return { summary, pretty };
-}
-
-function summarizeValue(v: unknown): string {
+function shortValue(v: unknown): string {
   if (typeof v === "string") {
-    return v.length > 40 ? JSON.stringify(v.slice(0, 37) + "…") : JSON.stringify(v);
+    return v.length > 30 ? JSON.stringify(v.slice(0, 27) + "…") : JSON.stringify(v);
   }
   if (Array.isArray(v)) return `[${v.length}]`;
   if (v && typeof v === "object") return "{…}";

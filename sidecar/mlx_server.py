@@ -360,6 +360,106 @@ def _swap_to_adapter(name: str | None) -> None:
 TOOL_OPEN = "<tool_call>"
 TOOL_CLOSE = "</tool_call>"
 
+# Gemma 3 / Gemma 4 native tool-call sentinels. When the tokenizer's
+# chat template accepts `tools=[...]`, Gemma is RL'd to emit calls wrapped
+# in these markers with a `call:name{key: <|"|>val<|"|>, ...}` body.
+GEMMA_TOOL_OPEN = "<|tool_call>"
+GEMMA_TOOL_CLOSE = "<tool_call|>"
+
+
+def _to_openai_tools(tools: list) -> list:
+    """Convert our flat tool-def shape to the OpenAI-style nested shape that
+    HuggingFace chat templates expect when you pass `tools=[...]`.
+
+    Our format (from `src/lib/tools.ts`):
+        {name, description, parameters: {key: {type, required, description}}}
+
+    HF format:
+        {type: "function", function: {name, description, parameters: {
+            type: "object",
+            properties: {key: {type, description}},
+            required: [keys where required is True],
+        }}}
+    """
+    out = []
+    for t in tools:
+        raw_params = t.get("parameters") or {}
+        properties = {}
+        required = []
+        for key, meta in raw_params.items():
+            if not isinstance(meta, dict):
+                properties[key] = {"type": "string"}
+                continue
+            properties[key] = {
+                "type": meta.get("type", "string"),
+                "description": meta.get("description", ""),
+            }
+            if meta.get("required", True):
+                required.append(key)
+        out.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": t.get("name", ""),
+                    "description": t.get("description", ""),
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                    },
+                },
+            }
+        )
+    return out
+
+
+def _tokenizer_supports_tools() -> bool:
+    """Does the loaded tokenizer's chat template branch on a `tools` arg?
+
+    Heuristic: inspect the raw template string for the substring `tools`.
+    HF chat templates uniformly use `{% if tools %}` or `{{ tools }}` when
+    they support tools, so the substring check is reliable and cheap.
+    """
+    tok = STATE.tokenizer
+    if tok is None:
+        return False
+    tmpl = getattr(tok, "chat_template", None)
+    if isinstance(tmpl, str):
+        return "tools" in tmpl
+    return False
+
+
+def _parse_gemma4_body(body: str) -> dict:
+    """Extract a single tool call from a Gemma 4 tool-call body.
+
+    The body between `<|tool_call>` and `<tool_call|>` contains one or more
+    `call:name{args}` fragments. We return the first one. Args use unquoted
+    keys and `<|"|>`-delimited strings; we reuse mlx_lm's parser.
+    """
+    from mlx_lm.tool_parsers.gemma4 import parse_tool_call  # type: ignore
+
+    parsed = parse_tool_call(body)
+    # parse_tool_call returns dict or list of dicts.
+    if isinstance(parsed, list):
+        parsed = parsed[0]
+    return {
+        "call_id": str(uuid.uuid4()),
+        "name": str(parsed.get("name", "")),
+        "args": parsed.get("arguments") or {},
+    }
+
+
+def _parse_json_body(body: str) -> dict:
+    """Extract a tool call from our custom JSON-body format."""
+    parsed = json.loads(body.strip())
+    if not isinstance(parsed, dict) or "name" not in parsed:
+        raise ValueError("tool_call must be a JSON object with a 'name'")
+    return {
+        "call_id": str(uuid.uuid4()),
+        "name": str(parsed["name"]),
+        "args": parsed.get("args") or {},
+    }
+
 
 def _format_tools_prompt(tools: list) -> str:
     """Render a compact tool-use preamble prepended to the first user turn.
@@ -392,38 +492,61 @@ def _format_tools_prompt(tools: list) -> str:
     return "\n".join(lines)
 
 
-def _format_prompt(prompt: str, messages: list | None, tools_prompt: str = "") -> str:
+def _format_prompt(
+    prompt: str,
+    messages: list | None,
+    tools: list | None = None,
+) -> tuple[str, bool]:
     """Apply the tokenizer's chat template if available. Falls back to the raw
     prompt for base (non-instruct) models.
 
-    `messages` (optional) is a list of {role, content} for multi-turn history;
-    when omitted, the prompt is treated as a single user message.
-    `tools_prompt` (optional) is prepended to the first user message so the
-    model sees the tool-use instructions regardless of chat-template support
-    for a `system` role.
+    Returns `(formatted_prompt, used_native_tools)`. When `used_native_tools`
+    is True, the tokenizer emitted the model's native tool preamble via its
+    `tools=` argument (Gemma's `call:name{...}` syntax, etc.) and the caller
+    should scan for the model-family-native sentinels. When False, tools
+    were either absent or the template doesn't support them; the caller
+    should prepend the hand-rolled JSON preamble and scan for `<tool_call>`.
     """
     tok = STATE.tokenizer
     apply = getattr(tok, "apply_chat_template", None)
     if not callable(apply):
-        if tools_prompt:
-            return f"{tools_prompt}\n\n{prompt}"
-        return prompt
+        return (prompt, False)
 
     chat = list(messages) if messages else []
     if not chat or chat[-1].get("role") != "user":
         chat.append({"role": "user", "content": prompt})
 
-    if tools_prompt:
+    use_native = bool(tools) and _tokenizer_supports_tools()
+
+    if use_native:
+        try:
+            formatted = apply(
+                chat,
+                add_generation_prompt=True,
+                tokenize=False,
+                tools=_to_openai_tools(tools),
+            )
+            return (formatted, True)
+        except Exception as e:
+            log(f"native tools chat template failed ({e}); falling back")
+            # fall through to manual preamble
+            use_native = False
+
+    # Manual fallback: inject the hand-rolled tools preamble into the first
+    # user message so the model sees the instructions even if its template
+    # lacks a system role or a `tools` branch.
+    if tools:
+        tools_prompt = _format_tools_prompt(tools)
         for i, m in enumerate(chat):
             if m.get("role") == "user":
                 chat[i] = {**m, "content": f"{tools_prompt}\n\n{m['content']}"}
                 break
 
     try:
-        return apply(chat, add_generation_prompt=True, tokenize=False)
+        return (apply(chat, add_generation_prompt=True, tokenize=False), False)
     except Exception as e:
         log(f"chat template failed ({e}); using raw prompt")
-        return prompt
+        return (prompt, False)
 
 
 def _partial_marker_suffix(buf: str, marker: str) -> int:
@@ -472,8 +595,13 @@ def op_generate(req: dict) -> dict:
         elif adapter is not None and adapter != STATE.active_adapter:
             _swap_to_adapter(adapter)
 
-        tools_prompt = _format_tools_prompt(tools)
-        formatted = _format_prompt(prompt, messages, tools_prompt)
+        formatted, native_tools = _format_prompt(prompt, messages, tools)
+        if native_tools:
+            open_marker, close_marker = GEMMA_TOOL_OPEN, GEMMA_TOOL_CLOSE
+            parse_body = _parse_gemma4_body
+        else:
+            open_marker, close_marker = TOOL_OPEN, TOOL_CLOSE
+            parse_body = _parse_json_body
 
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
@@ -512,42 +640,28 @@ def op_generate(req: dict) -> dict:
 
             if in_tool_call:
                 tool_body += text
-                if TOOL_CLOSE in tool_body:
-                    body, _, _ = tool_body.partition(TOOL_CLOSE)
+                if close_marker in tool_body:
+                    body, _, _ = tool_body.partition(close_marker)
                     try:
-                        parsed = json.loads(body.strip())
-                        if not isinstance(parsed, dict) or "name" not in parsed:
-                            raise ValueError("tool_call must be a JSON object with a 'name'")
-                        pending_tool_call = {
-                            "call_id": str(uuid.uuid4()),
-                            "name": str(parsed["name"]),
-                            "args": parsed.get("args") or {},
-                        }
+                        pending_tool_call = parse_body(body)
                     except Exception as e:
                         tool_call_error = f"tool_call parse error: {e}"
                     break
                 continue
 
             buffer += text
-            idx = buffer.find(TOOL_OPEN)
+            idx = buffer.find(open_marker)
             if idx >= 0:
                 pre = buffer[:idx]
                 if pre:
                     emit({"id": req_id, "type": "token", "text": pre})
-                tool_body = buffer[idx + len(TOOL_OPEN):]
+                tool_body = buffer[idx + len(open_marker):]
                 buffer = ""
                 in_tool_call = True
-                if TOOL_CLOSE in tool_body:
-                    body, _, _ = tool_body.partition(TOOL_CLOSE)
+                if close_marker in tool_body:
+                    body, _, _ = tool_body.partition(close_marker)
                     try:
-                        parsed = json.loads(body.strip())
-                        if not isinstance(parsed, dict) or "name" not in parsed:
-                            raise ValueError("tool_call must be a JSON object with a 'name'")
-                        pending_tool_call = {
-                            "call_id": str(uuid.uuid4()),
-                            "name": str(parsed["name"]),
-                            "args": parsed.get("args") or {},
-                        }
+                        pending_tool_call = parse_body(body)
                     except Exception as e:
                         tool_call_error = f"tool_call parse error: {e}"
                     break
@@ -555,7 +669,7 @@ def op_generate(req: dict) -> dict:
 
             # No marker seen. Hold back only the tail that could still become
             # the start of a marker across chunk boundaries; flush the rest.
-            hold = _partial_marker_suffix(buffer, TOOL_OPEN)
+            hold = _partial_marker_suffix(buffer, open_marker)
             if hold < len(buffer):
                 safe = buffer[: len(buffer) - hold]
                 if safe:
@@ -581,7 +695,10 @@ def op_generate(req: dict) -> dict:
             emit({"id": req_id, "type": "tool_error", "error": tool_call_error})
         elif in_tool_call:
             # Stream ended mid-tool-call without the close marker.
-            tool_call_error = "unclosed <tool_call> (model ran out of tokens)"
+            tool_call_error = (
+                f"unclosed tool call — expected {close_marker} "
+                "(model ran out of tokens)"
+            )
             emit({"id": req_id, "type": "tool_error", "error": tool_call_error})
 
         return {

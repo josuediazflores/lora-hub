@@ -10,7 +10,6 @@ import {
   isFeatured,
   pullQuoteOf,
   sizeOf,
-  trendOf,
   useCaseOf,
   USE_CASE_LABEL,
   versionOf,
@@ -369,14 +368,6 @@ function EditorialContent({
     [adapters],
   );
 
-  const trending = useMemo(() => {
-    return adapters
-      .filter((a) => a.slug !== hero?.slug)
-      .map((a) => ({ a, delta: deltaOf(a) }))
-      .sort((x, y) => y.delta - x.delta)
-      .slice(0, 5);
-  }, [adapters, hero]);
-
   const newAndNotable = useMemo(
     () => adapters.filter((a) => a.slug !== hero?.slug).slice(0, 3),
     [adapters, hero],
@@ -475,28 +466,6 @@ function EditorialContent({
           <line x1="56" y1="7" x2="92" y2="7" />
         </svg>
       </div>
-
-      {/* Trending band */}
-      {trending.length > 0 && (
-        <section className="mt-0">
-          <SectionHead
-            title="Moving this week"
-            dek="by 7-day install delta"
-            more="see the full chart →"
-          />
-          <div className="grid grid-cols-5 border-t border-b border-app-border">
-            {trending.map(({ a, delta }, i) => (
-              <TrendStrip
-                key={a.slug}
-                adapter={a}
-                rank={i + 1}
-                delta={delta}
-                onOpen={() => onOpenAdapter(a.slug)}
-              />
-            ))}
-          </div>
-        </section>
-      )}
 
       {/* New & notable */}
       {newAndNotable.length > 0 && (
@@ -761,86 +730,6 @@ function HeroCard({
         </span>
       </div>
     </article>
-  );
-}
-
-function TrendStrip({
-  adapter,
-  rank,
-  delta,
-  onOpen,
-}: {
-  adapter: StoreAdapter;
-  rank: number;
-  delta: number;
-  onOpen: () => void;
-}) {
-  const accent = useCaseAccent(useCaseOf(adapter));
-  const trend = trendOf(adapter);
-  const sign = delta >= 0 ? "+" : "";
-  const dir = delta >= 0 ? "var(--color-app-ok)" : "var(--color-app-danger)";
-  return (
-    <button
-      onClick={onOpen}
-      className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-2.5 border-r border-app-border px-3.5 py-3 text-left last:border-r-0 hover:bg-app-surface-hover"
-    >
-      <div className="font-serif text-[14px] text-app-text-faint" style={{ fontVariantNumeric: "oldstyle-nums" }}>
-        {String(rank).padStart(2, "0")}
-      </div>
-      <div className="min-w-0">
-        <div
-          className="truncate font-serif text-[15px] font-medium leading-[1.1] tracking-[-0.005em]"
-          style={{ color: accent }}
-        >
-          {adapter.name}
-        </div>
-        <div className="mt-0.5 font-mono text-[10.5px] text-app-text-faint">
-          {USE_CASE_LABEL[useCaseOf(adapter)]} · {compactNum(adapter.downloads)} dl
-        </div>
-      </div>
-      <div className="opacity-[0.85]">
-        <Sparkline values={trend} width={92} height={18} color={accent} />
-      </div>
-      <div className="font-mono text-[11px] font-medium" style={{ color: dir }}>
-        {sign}
-        {delta}%
-      </div>
-    </button>
-  );
-}
-
-function Sparkline({
-  values,
-  width,
-  height,
-  color,
-}: {
-  values: number[];
-  width: number;
-  height: number;
-  color: string;
-}) {
-  const max = Math.max(...values);
-  const min = Math.min(...values);
-  const range = Math.max(1, max - min);
-  const step = width / (values.length - 1);
-  const pts = values
-    .map(
-      (v, i) =>
-        `${(i * step).toFixed(1)},${(height - ((v - min) / range) * height).toFixed(1)}`,
-    )
-    .join(" ");
-  return (
-    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="block">
-      <polyline
-        points={pts}
-        fill="none"
-        stroke={color}
-        strokeWidth={1.3}
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 

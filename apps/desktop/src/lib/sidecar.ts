@@ -111,7 +111,7 @@ export async function loadAdapter(name: string, adapterPath: string) {
   return send({ op: "load_adapter", name, adapter_path: adapterPath });
 }
 
-export type ChatMessage = { role: "user" | "assistant"; content: string };
+export type ChatMessage = { role: "user" | "assistant" | "system"; content: string };
 
 export type GenerateHandle = {
   id: string;

@@ -32,9 +32,9 @@ export function FeaturedAdapters({ baseSha, installedSlugs, onTry }: Props) {
   if (!loaded || adapters.length === 0) return null;
 
   return (
-    <div className="mx-auto mt-8 max-w-2xl">
-      <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-app-text-faint">
-        Try an adapter
+    <div className="mx-auto mt-7 max-w-2xl">
+      <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.12em] text-app-text-faint">
+        try an adapter
       </div>
       <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
         {adapters.map((a) => {
@@ -44,31 +44,36 @@ export function FeaturedAdapters({ baseSha, installedSlugs, onTry }: Props) {
             <button
               key={a.slug}
               onClick={() => onTry(a)}
-              className="group flex flex-col items-start gap-2 rounded-xl border bg-app-surface p-3 text-left transition-colors hover:border-app-border-strong"
-              style={{ borderColor: accent.border }}
+              className="group relative flex flex-col items-start gap-1.5 overflow-hidden rounded-md border border-app-border bg-app-surface p-3 text-left transition-colors hover:border-app-border-strong"
             >
-              <div className="flex w-full items-center justify-between">
+              <span
+                aria-hidden
+                className="absolute top-0 left-0 h-full w-[3px]"
+                style={{ backgroundColor: accent.text }}
+              />
+              <div className="flex w-full items-center justify-between pl-1.5">
                 <span
-                  className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium"
-                  style={{
-                    backgroundColor: accent.bg,
-                    color: accent.text,
-                    borderColor: accent.border,
-                  }}
+                  className="font-mono text-[11px] font-medium"
+                  style={{ color: accent.text }}
                 >
                   {a.name}
                 </span>
                 <Play
-                  size={12}
-                  className="text-app-text-faint group-hover:text-app-accent"
+                  size={11}
+                  strokeWidth={2}
+                  className="text-app-text-faint transition-colors group-hover:text-app-accent"
                 />
               </div>
-              <div className="text-[11px] text-app-text-faint">by {a.author}</div>
-              <p className="line-clamp-2 text-xs text-app-text-muted">
+              <div className="pl-1.5 font-mono text-[10px] text-app-text-faint">
+                by {a.author}
+              </div>
+              <p className="line-clamp-2 pl-1.5 text-[12px] leading-[1.45] text-app-text-muted">
                 {a.description}
               </p>
               {installed && (
-                <span className="text-[10px] text-app-text-faint">installed</span>
+                <span className="pl-1.5 font-mono text-[10px] text-app-text-faint">
+                  · installed
+                </span>
               )}
             </button>
           );

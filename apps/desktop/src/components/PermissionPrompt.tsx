@@ -21,35 +21,35 @@ export function PermissionPrompt({
   onDeny,
 }: Props) {
   return (
-    <div className="rounded-xl border border-app-accent/30 bg-app-accent/5 p-3 text-xs">
+    <div className="rounded-md border border-app-accent/40 bg-app-accent/[0.06] p-3">
       <div className="flex items-center gap-2 text-app-accent">
-        <ShieldAlert size={13} />
-        <span className="text-sm font-semibold">{title}</span>
+        <ShieldAlert size={13} strokeWidth={2} />
+        <span className="text-[13px] font-semibold">{title}</span>
       </div>
-      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-app-bg/60 px-2 py-1 font-mono text-[11px] text-app-text">
+      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-sm bg-app-bg/60 px-2 py-1.5 font-mono text-[11px] leading-[1.5] text-app-text">
         {details}
       </pre>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
         <button
           type="button"
           onClick={onAllowOnce}
-          className="rounded-md bg-app-accent px-3 py-1 font-medium text-app-bg hover:bg-app-accent/90"
+          className="rounded-md bg-app-accent px-3 py-1 font-medium text-app-bg hover:bg-app-accent-soft"
         >
-          Allow once
+          allow once
         </button>
         <button
           type="button"
           onClick={onAllowSession}
           className="rounded-md border border-app-accent/50 px-3 py-1 text-app-accent hover:bg-app-accent/10"
         >
-          Allow this session
+          allow this session
         </button>
         <button
           type="button"
           onClick={onDeny}
           className="rounded-md px-3 py-1 text-app-text-muted hover:bg-app-surface-hover hover:text-app-text"
         >
-          Deny
+          deny
         </button>
       </div>
     </div>

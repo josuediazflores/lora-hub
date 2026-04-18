@@ -1,4 +1,4 @@
-import { Sparkles } from "lucide-react";
+import { Terminal } from "lucide-react";
 
 type Props = {
   active: boolean;
@@ -7,11 +7,8 @@ type Props = {
 };
 
 /**
- * The inline "Computer Use" mode chip shown at the start of the composer's
- * text row. When active, Computer Use drives the agent loop (tool calls,
- * permission presets, workspace-confined I/O).
- *
- * Purple is reserved for this mode only; the rest of the app stays orange.
+ * Inline mode chip at the start of the composer text row. Plum-accented
+ * when on. Terminal glyph matches the engineered / instrument feel.
  */
 export function ModeChip({ active, onToggle, disabled }: Props) {
   return (
@@ -21,17 +18,18 @@ export function ModeChip({ active, onToggle, disabled }: Props) {
       disabled={disabled}
       title={
         active
-          ? "Computer Use is on — agent can call tools. Click to disable."
+          ? "Computer Use is on — the agent can call tools. Click to disable."
           : "Turn on Computer Use — lets the model read files, run commands, fetch URLs."
       }
-      className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+      className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 font-mono text-[11px] font-medium transition-colors ${
         active
-          ? "bg-app-purple/15 text-app-purple ring-1 ring-inset ring-app-purple/40"
+          ? "bg-app-purple/15 text-app-purple ring-1 ring-inset ring-app-purple/45"
           : "border border-app-border text-app-text-muted hover:border-app-purple/50 hover:text-app-purple"
       } disabled:cursor-not-allowed disabled:opacity-40`}
     >
-      <Sparkles size={11} className={active ? "fill-app-purple" : ""} />
-      Computer Use
+      <Terminal size={11} strokeWidth={2.2} />
+      computer_use
+      {active && <span className="text-app-purple/70">·on</span>}
     </button>
   );
 }

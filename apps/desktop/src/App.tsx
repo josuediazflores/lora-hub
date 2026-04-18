@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { RefreshCw, Square } from "lucide-react";
 import { Markdown } from "./components/Markdown";
 import {
-  SettingsPanel,
+  SettingsPage,
   loadSettings,
   saveSettings,
   type Settings,
@@ -25,8 +25,28 @@ import { ActiveAdapterStrip } from "./components/ActiveAdapterStrip";
 import { WorkspaceFooter } from "./components/WorkspaceFooter";
 import { ToolCallBubble, type ToolCallMessage } from "./components/ToolCallBubble";
 import { TurnRow, SwapMarker, GutterBtn } from "./components/TurnRow";
+import { ThoughtDisclosure } from "./components/ThoughtDisclosure";
+import { parseThinking } from "./lib/thinking";
 import { adapterAccent } from "./lib/adapter-accent";
 import { applyTheme, watchSystemTheme } from "./lib/theme";
+import {
+  listMemories,
+  saveMemory,
+  deleteMemory,
+  type Memory,
+  type MemoryInput,
+} from "./lib/memory";
+import {
+  readAttachment,
+  formatAttachmentsForPrompt,
+  type Attachment,
+} from "./lib/attachments";
+import {
+  CommandPalette,
+  PaletteIcons,
+  type PaletteAction,
+  type PaletteChat,
+} from "./components/CommandPalette";
 import {
   getPreset,
   getWorkspace,
@@ -90,7 +110,19 @@ type ComparisonMessage = {
   pending: "base" | "adapter" | null;
 };
 
-type AnyMessage = Message | ComparisonMessage | ToolCallMessage;
+/** Lightweight inline marker rendered when the model uses save_memory
+ * during normal chat. Keeps the reading flow uninterrupted — no expandable
+ * tool bubble, just a single-line pill that links back to Settings → Memory. */
+type MemoryChipMessage = {
+  id: string;
+  role: "memory_chip";
+  name: string;
+  kind?: string | null;
+  status: "saved" | "denied" | "error";
+  detail?: string;
+};
+
+type AnyMessage = Message | ComparisonMessage | ToolCallMessage | MemoryChipMessage;
 
 type Status = {
   base_model_id: string | null;
@@ -110,6 +142,7 @@ type View = SidebarView;
 
 const STORAGE_KEY = "lora-hub:chats:v1";
 const ACTIVE_KEY = "lora-hub:active-chat:v1";
+const LAST_BASE_KEY = "lora-hub:last-base-id:v1";
 
 type PersistedChat = { id: string; title: string; messages: AnyMessage[]; pinned?: boolean };
 
@@ -154,6 +187,9 @@ function cleanOnLoad(m: AnyMessage): AnyMessage {
   if (m.role === "comparison") {
     return { ...m, pending: null };
   }
+  if (m.role === "memory_chip") {
+    return m;
+  }
   if (m.role === "tool_call") {
     // Trim big outputs on persist so localStorage doesn't balloon.
     const MAX = 2000;
@@ -173,13 +209,26 @@ function cleanOnLoad(m: AnyMessage): AnyMessage {
  * to their adapter output. Tool-call messages expand into a synthetic
  * assistant turn carrying the call marker followed by a synthetic user turn
  * carrying the tool result, so the model sees prior tool interactions on any
- * follow-up generate. */
-function buildHistory(msgs: AnyMessage[]): sidecar.ChatMessage[] {
+ * follow-up generate. A non-empty `systemPrompt` is prepended as a single
+ * `system` role message; the sidecar routes it through the tokenizer's
+ * chat template. */
+function buildHistory(
+  msgs: AnyMessage[],
+  systemPrompt: string = "",
+  memories: Memory[] = [],
+): sidecar.ChatMessage[] {
   const out: sidecar.ChatMessage[] = [];
+  const sys = buildSystemMessage(systemPrompt, memories);
+  if (sys) out.push({ role: "system", content: sys });
   for (const m of msgs) {
     if (m.role === "comparison") {
       const content = m.adapterText.trim();
       if (content) out.push({ role: "assistant", content });
+    } else if (m.role === "memory_chip") {
+      // Memory chips are UI-only — the memory itself already lives in the
+      // system message, and the tool exchange is folded into the assistant's
+      // enclosing message. Nothing to emit here.
+      continue;
     } else if (m.role === "tool_call") {
       out.push({
         role: "assistant",
@@ -206,6 +255,100 @@ function buildHistory(msgs: AnyMessage[]): sidecar.ChatMessage[] {
   return out;
 }
 
+/** Combines the user's static system prompt with a bulleted block of stored
+ * memories. Memories are dropped from the tail until the combined message is
+ * under the budget; individual memories are never silently truncated. */
+const MEMORY_SYSTEM_BUDGET = 4_000;
+
+/** Back-of-envelope token count. Proper tokenizers live in the sidecar,
+ * but pinging it on every keystroke is wasteful. For a context-usage
+ * chip, ~3.8 chars/token (English+code mix) is within ~10% of the
+ * actual HF tokenizer output and is what matters for a "near the limit"
+ * warning. */
+function estimateTokens(text: string): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 3.8);
+}
+
+function estimateMessageTokens(messages: AnyMessage[]): number {
+  let sum = 0;
+  for (const m of messages) {
+    if (m.role === "comparison") {
+      sum += estimateTokens(m.adapterText) + estimateTokens(m.baseText) + 8;
+    } else if (m.role === "tool_call") {
+      sum +=
+        estimateTokens(m.name) +
+        estimateTokens(JSON.stringify(m.args)) +
+        estimateTokens(m.output ?? "") +
+        estimateTokens(m.error ?? "") +
+        16;
+    } else if (m.role === "memory_chip") {
+      // Not included in prompt — see buildHistory.
+      continue;
+    } else {
+      sum += estimateTokens(m.text) + 4; // + role overhead
+    }
+  }
+  return sum;
+}
+
+/** Context window per base family. Numbers are conservative — we'd rather
+ * warn at 6.5k when the real cap is 8k than miss a warning. Keyed by
+ * substrings of `base_model_id` so we don't have to exhaustively list
+ * every repo. */
+function contextLimitFor(baseId: string | null | undefined): number {
+  if (!baseId) return 8192;
+  const id = baseId.toLowerCase();
+  if (id.includes("gemma-4") || id.includes("gemma4")) return 8192;
+  if (id.includes("gemma-3") || id.includes("gemma3")) return 8192;
+  if (id.includes("llama-3") || id.includes("llama3")) return 8192;
+  return 8192;
+}
+
+/** Short date/time anchor prepended to every system message. Gemma has no
+ * internal clock — without this it resolves "tomorrow" / "this year" from
+ * its training cutoff, which produces wrong answers for anything temporal. */
+function currentDateContext(): string {
+  const now = new Date();
+  const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const weekday = now.toLocaleDateString("en-US", { weekday: "long" });
+  let tz = "UTC";
+  try {
+    tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    // ignore — some exotic runtimes don't expose this
+  }
+  return `Today is ${iso} (${weekday}). The user's local timezone is ${tz}. Use this as ground truth for any time-sensitive question — "tomorrow", "next week", "this year" — and when deciding whether to run a fresh web_search.`;
+}
+
+function buildSystemMessage(systemPrompt: string, memories: Memory[]): string {
+  const prompt = systemPrompt.trim();
+  const dateLine = currentDateContext();
+
+  if (!memories.length) {
+    return prompt ? `${prompt}\n\n${dateLine}` : dateLine;
+  }
+
+  // Greedy fit: include memories oldest-updated-first until the block would
+  // overflow. Tail memories (newest) are the ones that get dropped — the
+  // rationale is that a fresh, un-curated memory is more likely to be noise
+  // than something you've had pinned for weeks.
+  const lines = ["The user has recorded the following durable notes about themselves. Use them to personalize responses; don't repeat them back verbatim unless asked."];
+  const baseBytes = (prompt ? prompt.length + 2 : 0) + dateLine.length + 2;
+  let bytes = baseBytes + lines[0].length;
+  const sortedOldestFirst = [...memories].sort((a, b) => a.updated_at - b.updated_at);
+  for (const m of sortedOldestFirst) {
+    const suffix = m.kind ? ` (${m.kind})` : "";
+    const line = `- ${m.name}: ${m.content}${suffix}`;
+    if (bytes + line.length + 1 > MEMORY_SYSTEM_BUDGET) break;
+    lines.push(line);
+    bytes += line.length + 1;
+  }
+  const memoryBlock = lines.join("\n");
+  const parts = [prompt, dateLine, memoryBlock].filter((s) => s.length > 0);
+  return parts.join("\n\n");
+}
+
 function App() {
   const initial = useRef(loadPersistedChats());
   const [status, setStatus] = useState<Status | null>(null);
@@ -215,8 +358,10 @@ function App() {
     initial.current.activeId || initial.current.chats[0].id,
   );
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [settings, setSettings] = useState<Settings>(loadSettings);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [inflightGenId, setInflightGenId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
@@ -242,6 +387,16 @@ function App() {
   const [storeSubView, setStoreSubView] = useState<"landing" | "browse">("landing");
   const [browsePreset, setBrowsePreset] = useState<{ useCase?: UseCase } | null>(null);
   const [adapterDetailSlug, setAdapterDetailSlug] = useState<string | null>(null);
+  const [memories, setMemories] = useState<Memory[]>([]);
+  const [pendingMemory, setPendingMemory] = useState<
+    | {
+        toolCallId: string;
+        proposed: MemoryInput;
+        source: string | null;
+        resolve: (accepted: MemoryInput | null) => void;
+      }
+    | null
+  >(null);
   const [pendingBase, setPendingBase] = useState<StoreBase | null>(null);
   const [compareMode, setCompareMode] = useState<boolean>(false);
   const [computerUseMode, setComputerUseMode] = useState<boolean>(false);
@@ -256,6 +411,22 @@ function App() {
     bases.find((b) => b.hf_repo === status?.base_model_id) ?? null;
   const baseLabel = activeBase?.name ?? "no base";
   const isWelcome = messages.length === 0;
+
+  // Back-of-envelope token tally for the upcoming turn. Includes the
+  // history, the injected system block (prompt + date + memories), and the
+  // text the user is currently typing. Output reservation (max_tokens)
+  // isn't counted — it's what *remains* of the context budget.
+  const tokenUsage = (() => {
+    const systemBlock = buildSystemMessage(
+      settings.systemPrompt,
+      settings.useMemoryInContext ? memories : [],
+    );
+    const used =
+      estimateTokens(systemBlock) +
+      estimateMessageTokens(messages) +
+      estimateTokens(input);
+    return { used, limit: contextLimitFor(status?.base_model_id) };
+  })();
 
   async function refreshStatus() {
     try {
@@ -281,7 +452,54 @@ function App() {
       });
     getPreset().then(setPermissionPresetState).catch(() => {});
     getWorkspace().then(setWorkspaceState).catch(() => {});
+    listMemories().then(setMemories).catch(() => {});
   }, []);
+
+  async function refreshMemories() {
+    try {
+      setMemories(await listMemories());
+    } catch {
+      // ignore — memory store absent is non-fatal
+    }
+  }
+
+  async function handleMemoryToolCall(
+    args: Record<string, unknown>,
+    chatId: string,
+  ): Promise<{ status: "success" | "error" | "denied"; output?: string; error?: string }> {
+    const policy = settings.memoryWritePolicy;
+    const proposed: MemoryInput = {
+      name: String(args.name ?? "").slice(0, 80),
+      content: String(args.content ?? ""),
+      kind: (args.kind as string | undefined) ?? null,
+    };
+    if (policy === "off") {
+      return { status: "denied", error: "memory writes are disabled in Settings" };
+    }
+    let approved: MemoryInput | null = proposed;
+    if (policy === "ask") {
+      approved = await new Promise<MemoryInput | null>((resolve) => {
+        setPendingMemory({
+          toolCallId: chatId,
+          proposed,
+          source: `agent:${chatId}`,
+          resolve,
+        });
+      });
+      if (!approved) {
+        return { status: "denied", error: "user declined memory save" };
+      }
+    }
+    try {
+      const saved = await saveMemory({
+        ...approved,
+        source: `agent:${chatId}`,
+      });
+      return { status: "success", output: `saved memory "${saved.name}"` };
+    } catch (e) {
+      return { status: "error", error: String(e) };
+    }
+  }
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -311,6 +529,111 @@ function App() {
     if (settings.theme !== "system") return;
     return watchSystemTheme(() => applyTheme(settings.theme));
   }, [settings.theme]);
+
+  // Listen for files dragged onto the window. Tauri's native drag-drop
+  // event fires with {type: "over"|"drop"|"leave", paths?}. For each
+  // dropped path we call the Rust `read_attachment` command and append
+  // the resulting payload to state — success and "unsupported" alike,
+  // because the UI renders an error chip for the latter.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      try {
+        const mod = await import("@tauri-apps/api/webview");
+        const webview = mod.getCurrentWebview();
+        unlisten = await webview.onDragDropEvent(async (event) => {
+          const kind = (event.payload as { type: string }).type;
+          if (kind === "over") {
+            setDragOver(true);
+            return;
+          }
+          if (kind === "leave") {
+            setDragOver(false);
+            return;
+          }
+          if (kind === "drop") {
+            setDragOver(false);
+            const paths =
+              (event.payload as { paths?: string[] }).paths ?? [];
+            for (const p of paths) {
+              try {
+                const a = await readAttachment(p);
+                setAttachments((prev) => [...prev, a]);
+              } catch (e) {
+                setAttachments((prev) => [
+                  ...prev,
+                  {
+                    id: crypto.randomUUID(),
+                    kind: "unsupported",
+                    name: p.split("/").pop() ?? p,
+                    size: 0,
+                    mime: "",
+                    reason: String(e),
+                  },
+                ]);
+              }
+            }
+          }
+        });
+      } catch (e) {
+        console.warn("drag-drop listener failed:", e);
+      }
+    })();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  function removeAttachment(id: string) {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  }
+
+  // Global keyboard: Cmd+K (macOS) / Ctrl+K (cross-platform) toggles the
+  // command palette. Allow it even when focused inside an input/textarea
+  // so you never have to click out of the composer to switch chats.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // One-shot auto-load of the last-used base on app start when the user has
+  // opted in. Guarded by a ref so toggling the setting mid-session doesn't
+  // retrigger it; next launch picks up the new preference.
+  const autoLoadAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (autoLoadAttemptedRef.current) return;
+    if (!settings.autoLoadLastBase) return;
+    if (!bases.length) return;
+    if (status === null) return;
+    if (status.base_model_id) {
+      autoLoadAttemptedRef.current = true;
+      return;
+    }
+    let lastBaseId: string | null = null;
+    try {
+      lastBaseId = localStorage.getItem(LAST_BASE_KEY);
+    } catch {
+      return;
+    }
+    if (!lastBaseId) {
+      autoLoadAttemptedRef.current = true;
+      return;
+    }
+    const target = bases.find((b) => b.base_id === lastBaseId);
+    if (!target) {
+      autoLoadAttemptedRef.current = true;
+      return;
+    }
+    autoLoadAttemptedRef.current = true;
+    void handleLoadBase(target);
+  }, [bases, status, settings.autoLoadLastBase]);
 
   useEffect(() => {
     if (!status?.active_adapter && compareMode) setCompareMode(false);
@@ -484,6 +807,11 @@ function App() {
             : m,
         ),
       }));
+      try {
+        localStorage.setItem(LAST_BASE_KEY, base.base_id);
+      } catch {
+        // quota / privacy modes — auto-load simply won't trigger next time
+      }
     }
     await refreshStatus();
     setBusy(false);
@@ -701,19 +1029,29 @@ function App() {
   }
 
   async function handleSend() {
-    const prompt = input.trim();
-    if (!prompt || busy) return;
+    const typed = input.trim();
+    // Attachments alone are a valid send (e.g. "here's a file, read it").
+    if (!typed && attachments.length === 0) return;
+    if (busy) return;
     if (!baseLoaded) {
       pushSystem("Load the base model first.");
       return;
     }
+    const prompt = (typed || "(see attachment)") + formatAttachmentsForPrompt(attachments);
+    const currentAttachments = attachments;
+    setAttachments([]);
     if (compareMode && status?.active_adapter) {
       return handleSendCompare(prompt, status.active_adapter);
     }
     if (computerUseMode) {
+      // Restore the user's typed text into history via runAgentTurn's own
+      // path; the prompt already includes the attachment body.
       return runAgentTurn(prompt);
     }
     setInput("");
+    // Silence unused-var — consumed upstream; future attachments panel may
+    // reference `currentAttachments` directly for render metadata.
+    void currentAttachments;
     await runNormalTurn(prompt, status?.active_adapter ?? null);
   }
 
@@ -725,56 +1063,168 @@ function App() {
       role: "user",
       text: prompt,
     };
-    const assistantId = crypto.randomUUID();
-    const assistantMsg: Message = {
-      id: assistantId,
-      role: "assistant",
-      text: "",
-      adapter,
-      pending: true,
-    };
     patchActiveChat((c) => ({
       ...c,
       title: c.title || prompt.slice(0, 48),
-      messages: [...c.messages, userMsg, assistantMsg],
+      messages: [...c.messages, userMsg],
     }));
 
-    const history: sidecar.ChatMessage[] = buildHistory(activeChat.messages);
+    // Normal chat can optionally expose a tightly-scoped tool set: save_memory
+    // (renders as a chip) and/or the web tools fetch_page + web_search
+    // (render as standard tool bubbles). Filesystem and shell tools remain
+    // Computer-Use-only because they need a workspace pick.
+    const memoryToolEnabled =
+      settings.memoryInNormalChat && settings.memoryWritePolicy !== "off";
+    const webToolsEnabled = settings.webToolsInNormalChat;
+    const allowedToolNames = new Set<string>();
+    if (memoryToolEnabled) allowedToolNames.add("save_memory");
+    if (webToolsEnabled) {
+      allowedToolNames.add("fetch_page");
+      allowedToolNames.add("web_search");
+    }
+    const toolDefs =
+      allowedToolNames.size > 0
+        ? TOOL_DEFS.filter((t) => allowedToolNames.has(t.name))
+        : undefined;
 
-    const handle = sidecar.generate(prompt, {
-      adapter: adapter ?? undefined,
-      messages: history,
-      temperature: settings.temperature,
-      topP: settings.topP,
-      maxTokens: settings.maxTokens,
-      onToken: (text) => {
+    let history: sidecar.ChatMessage[] = buildHistory(
+      activeChat.messages,
+      settings.systemPrompt,
+      settings.useMemoryInContext ? memories : [],
+    );
+    let currentPrompt = prompt;
+    const MAX_STEPS = allowedToolNames.size > 0 ? 4 : 1;
+
+    try {
+      for (let step = 0; step < MAX_STEPS; step++) {
+        const assistantId = crypto.randomUUID();
         patchActiveChat((c) => ({
           ...c,
-          messages: c.messages.map((m) =>
-            m.id === assistantId && m.role === "assistant"
-              ? { ...m, text: m.text + text }
-              : m,
-          ),
+          messages: [
+            ...c.messages,
+            { id: assistantId, role: "assistant", text: "", adapter, pending: true },
+          ],
         }));
-      },
-    });
-    setInflightGenId(handle.id);
-    const res = await handle.result;
-    setInflightGenId(null);
 
-    patchActiveChat((c) => ({
-      ...c,
-      messages: c.messages.map((m) => {
-        if (m.id !== assistantId || m.role !== "assistant") return m;
-        if (res.type === "error") {
-          return { ...m, text: `[error: ${res.error.message}]`, pending: false };
+        let assistantAccum = "";
+        let toolCall: sidecar.SidecarToolCall | null = null;
+
+        const handle = sidecar.generate(currentPrompt, {
+          adapter: adapter ?? undefined,
+          messages: history,
+          temperature: settings.temperature,
+          topP: settings.topP,
+          maxTokens: settings.maxTokens,
+          tools: toolDefs,
+          onToken: (text) => {
+            assistantAccum += text;
+            patchActiveChat((c) => ({
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id === assistantId && m.role === "assistant"
+                  ? { ...m, text: m.text + text }
+                  : m,
+              ),
+            }));
+          },
+          onToolCall: (call) => {
+            toolCall = call;
+          },
+        });
+        setInflightGenId(handle.id);
+        const res = await handle.result;
+        setInflightGenId(null);
+
+        // Finalize the current assistant message.
+        patchActiveChat((c) => ({
+          ...c,
+          messages: c.messages.map((m) => {
+            if (m.id !== assistantId || m.role !== "assistant") return m;
+            if (res.type === "error") {
+              return { ...m, text: `[error: ${res.error.message}]`, pending: false };
+            }
+            const r = res.result as { aborted?: boolean };
+            const suffix = r.aborted ? " ⏹" : "";
+            return { ...m, text: m.text + suffix, pending: false };
+          }),
+        }));
+
+        if (res.type === "error") break;
+        if (!toolCall) break;
+
+        const call: sidecar.SidecarToolCall = toolCall;
+        if (!allowedToolNames.has(call.name)) {
+          // Model asked for a tool we didn't offer — dead end in this mode.
+          break;
         }
-        const r = res.result as { aborted?: boolean };
-        const suffix = r.aborted ? " ⏹" : "";
-        return { ...m, text: m.text + suffix, pending: false };
-      }),
-    }));
-    setBusy(false);
+
+        let result: Awaited<ReturnType<typeof runTool>>;
+        if (call.name === "save_memory") {
+          // Memory save renders as a compact chip, gated by the user's policy.
+          const mResult = await handleMemoryToolCall(call.args, activeChatId);
+          const chip: MemoryChipMessage = {
+            id: crypto.randomUUID(),
+            role: "memory_chip",
+            name: String(call.args.name ?? "memory"),
+            kind: (call.args.kind as string | undefined) ?? null,
+            status:
+              mResult.status === "success"
+                ? "saved"
+                : mResult.status === "denied"
+                  ? "denied"
+                  : "error",
+            detail: mResult.error ?? mResult.output ?? undefined,
+          };
+          patchActiveChat((c) => ({ ...c, messages: [...c.messages, chip] }));
+          if (mResult.status === "success") refreshMemories();
+          result = mResult;
+        } else {
+          // Web tools: render as a normal tool bubble so the user can see
+          // what was searched or fetched.
+          const tcId = crypto.randomUUID();
+          const tcMsg: ToolCallMessage = {
+            id: tcId,
+            role: "tool_call",
+            callId: call.call_id,
+            name: call.name,
+            args: call.args,
+            status: "pending",
+          };
+          patchActiveChat((c) => ({ ...c, messages: [...c.messages, tcMsg] }));
+          result = await runTool(call.name, call.args);
+          patchActiveChat((c) => ({
+            ...c,
+            messages: c.messages.map((m) =>
+              m.id === tcId && m.role === "tool_call"
+                ? {
+                    ...m,
+                    status: result.status,
+                    output: result.output,
+                    error: result.error,
+                    truncated: result.truncated,
+                  }
+                : m,
+            ),
+          }));
+        }
+
+        // Feed the tool exchange back into the next iteration's context so
+        // the model can wrap its reply around the result.
+        const assistantContent =
+          assistantAccum +
+          `\n<tool_call>${JSON.stringify({ name: call.name, args: call.args })}</tool_call>`;
+        history = [...history, { role: "assistant", content: assistantContent }];
+        const resultBody =
+          result.status === "success"
+            ? (result.output ?? "")
+            : (result.error ?? "unknown error");
+        currentPrompt = `[tool result: ${call.name}${
+          result.status !== "success" ? " " + result.status : ""
+        }]\n${resultBody}`;
+      }
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function runAgentTurn(prompt: string) {
@@ -799,7 +1249,7 @@ function App() {
       messages: [...c.messages, userMsg],
     }));
 
-    let history: sidecar.ChatMessage[] = buildHistory(activeChat.messages);
+    let history: sidecar.ChatMessage[] = buildHistory(activeChat.messages, settings.systemPrompt, settings.useMemoryInContext ? memories : []);
     let currentPrompt = prompt;
     const adapter = status?.active_adapter ?? null;
     const MAX_STEPS = 8;
@@ -913,7 +1363,15 @@ function App() {
         };
         patchActiveChat((c) => ({ ...c, messages: [...c.messages, tcMsg] }));
 
-        const result = await runTool(call.name, call.args);
+        let result: Awaited<ReturnType<typeof runTool>>;
+        if (call.name === "save_memory") {
+          result = await handleMemoryToolCall(call.args, activeChatId);
+        } else {
+          result = await runTool(call.name, call.args);
+        }
+        if (call.name === "save_memory" && result.status === "success") {
+          refreshMemories();
+        }
         patchActiveChat((c) => ({
           ...c,
           messages: c.messages.map((m) =>
@@ -989,7 +1447,7 @@ function App() {
       messages: [...c.messages, userMsg, compareMsg],
     }));
 
-    const history: sidecar.ChatMessage[] = buildHistory(activeChat.messages);
+    const history: sidecar.ChatMessage[] = buildHistory(activeChat.messages, settings.systemPrompt, settings.useMemoryInContext ? memories : []);
 
     function patchCompare(
       update: (m: ComparisonMessage) => ComparisonMessage,
@@ -1101,7 +1559,7 @@ function App() {
       ],
     }));
 
-    const history: sidecar.ChatMessage[] = buildHistory(beforeUser);
+    const history: sidecar.ChatMessage[] = buildHistory(beforeUser, settings.systemPrompt, settings.useMemoryInContext ? memories : []);
 
     setBusy(true);
     const handle = sidecar.generate(userPrompt, {
@@ -1155,8 +1613,121 @@ function App() {
 
   const installedSlugs = new Set(status?.adapters.map((a) => a.name) ?? []);
 
+  const paletteActions: PaletteAction[] = [
+    {
+      kind: "action",
+      id: "new-chat",
+      label: "New chat",
+      hint: "start a fresh conversation",
+      shortcut: "⌘N",
+      icon: PaletteIcons.New,
+      run: () => newChat(),
+    },
+    {
+      kind: "action",
+      id: "view-chat",
+      label: "Open chat view",
+      hint: "return to the active conversation",
+      icon: PaletteIcons.New,
+      run: () => setView("chat"),
+    },
+    {
+      kind: "action",
+      id: "view-models",
+      label: "Models",
+      hint: "browse & load base models",
+      icon: PaletteIcons.Models,
+      run: () => setView("models"),
+    },
+    {
+      kind: "action",
+      id: "view-adapters",
+      label: "Adapters",
+      hint: "installed LoRA adapters",
+      icon: PaletteIcons.Adapters,
+      run: () => setView("adapters"),
+    },
+    {
+      kind: "action",
+      id: "view-store",
+      label: "Store",
+      hint: "find new adapters",
+      icon: PaletteIcons.Store,
+      run: () => setView("store"),
+    },
+    {
+      kind: "action",
+      id: "view-settings",
+      label: "Settings",
+      hint: "preferences, memory, integrations",
+      icon: PaletteIcons.Settings,
+      run: () => setView("settings"),
+    },
+    {
+      kind: "action",
+      id: "pick-workspace",
+      label: "Pick workspace…",
+      hint: "set the folder the agent can read/write",
+      icon: PaletteIcons.Workspace,
+      run: () => handlePickWorkspace(),
+    },
+    {
+      kind: "action",
+      id: "toggle-compare",
+      label: "Toggle compare mode",
+      hint: "base vs adapter side-by-side",
+      icon: PaletteIcons.Compare,
+      run: () => toggleCompareMutex(),
+    },
+    {
+      kind: "action",
+      id: "toggle-agent",
+      label: "Toggle Computer Use",
+      hint: "grant full tool access for this turn",
+      icon: PaletteIcons.Agent,
+      run: () => toggleComputerUse(),
+    },
+  ];
+
+  const paletteChats: PaletteChat[] = chats.map((c) => {
+    // Most recent text-bearing message makes a cleaner preview than the
+    // oldest one.
+    const recent = [...c.messages]
+      .reverse()
+      .find((m) => m.role === "user" || m.role === "assistant") as
+      | Message
+      | undefined;
+    const preview = (recent?.text ?? "").replace(/\s+/g, " ").slice(0, 120);
+    return {
+      kind: "chat",
+      id: c.id,
+      title: c.title || "untitled",
+      preview,
+      run: () => {
+        setActiveChatId(c.id);
+        setView("chat");
+      },
+    };
+  });
+
   return (
-    <div className="flex h-full bg-app-bg text-app-text">
+    <div className="relative flex h-full bg-app-bg text-app-text">
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        actions={paletteActions}
+        chats={paletteChats}
+      />
+      {dragOver && (
+        <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-app-bg/80 backdrop-blur-sm">
+          <div className="rounded-xl border-2 border-dashed border-app-accent px-8 py-6 text-center">
+            <div className="font-serif text-[22px] text-app-text">Drop to attach</div>
+            <div className="mt-1 font-mono text-[11px] text-app-text-muted">
+              text · pdf · image
+            </div>
+          </div>
+        </div>
+      )}
       <Sidebar
         conversations={sidebarConversations}
         activeId={activeChatId}
@@ -1171,7 +1742,7 @@ function App() {
         onOpenStore={() => setView("store")}
         onOpenModels={() => setView("models")}
         onOpenAdapters={() => setView("adapters")}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => setView("settings")}
         onTogglePin={togglePin}
         userName={USER_NAME}
       />
@@ -1187,7 +1758,22 @@ function App() {
           <ActiveAdapterStrip name={status.active_adapter} />
         )}
 
-        {view === "models" ? (
+        {view === "settings" ? (
+          <SettingsPage
+            settings={settings}
+            onChange={setSettings}
+            onBack={() => setView("chat")}
+            memories={memories}
+            onSaveMemory={async (m) => {
+              await saveMemory(m);
+              await refreshMemories();
+            }}
+            onDeleteMemory={async (id) => {
+              await deleteMemory(id);
+              await refreshMemories();
+            }}
+          />
+        ) : view === "models" ? (
           <ModelsView
             bases={bases}
             activeBaseId={activeBase?.base_id ?? null}
@@ -1275,6 +1861,9 @@ function App() {
             installedSlugs={installedSlugs}
             onTryAdapter={handleTryAdapter}
             workspacePath={workspace?.root ?? null}
+            tokenUsage={tokenUsage}
+            attachments={attachments}
+            onRemoveAttachment={removeAttachment}
             chips={defaultChips({
               baseLoaded,
               adaptersInstalled: status?.adapters.length ?? 0,
@@ -1299,6 +1888,7 @@ function App() {
             baseLabel={baseLabel}
             baseLoaded={baseLoaded}
             baseSha={status?.base_sha ?? null}
+            showThinkingInline={settings.showThinkingInline}
             baseId={activeBase?.base_id ?? null}
             bases={bases}
             onPickBase={(id) => {
@@ -1320,17 +1910,12 @@ function App() {
             onPickPreset={handlePickPreset}
             workspace={workspace}
             onPickWorkspace={handlePickWorkspace}
+            tokenUsage={tokenUsage}
+            attachments={attachments}
+            onRemoveAttachment={removeAttachment}
           />
         )}
       </main>
-
-      {settingsOpen && (
-        <SettingsPanel
-          settings={settings}
-          onChange={setSettings}
-          onClose={() => setSettingsOpen(false)}
-        />
-      )}
 
       {pendingBase && (
         <ConfirmModal
@@ -1357,7 +1942,84 @@ function App() {
           }}
         />
       )}
+
+      {pendingMemory && (
+        <MemoryApprovalModal
+          initial={pendingMemory.proposed}
+          onCancel={() => {
+            pendingMemory.resolve(null);
+            setPendingMemory(null);
+          }}
+          onConfirm={(edited) => {
+            pendingMemory.resolve(edited);
+            setPendingMemory(null);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+function MemoryApprovalModal({
+  initial,
+  onCancel,
+  onConfirm,
+}: {
+  initial: MemoryInput;
+  onCancel: () => void;
+  onConfirm: (m: MemoryInput) => void;
+}) {
+  const [name, setName] = useState(initial.name);
+  const [content, setContent] = useState(initial.content);
+  const [kind, setKind] = useState<string>(initial.kind ?? "");
+  return (
+    <ConfirmModal
+      title="Save this memory?"
+      confirmLabel="Save memory"
+      body={
+        <div className="space-y-3">
+          <p className="text-xs text-app-text-faint">
+            The assistant proposes saving a durable note. Edit or cancel before it
+            becomes part of every future turn.
+          </p>
+          <label className="block">
+            <span className="font-mono text-[11px] tracking-[0.1em] uppercase text-app-text-muted">name</span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              maxLength={80}
+              className="mt-1 w-full rounded-md border border-app-border bg-app-surface px-3 py-1.5 font-mono text-[12.5px] text-app-text focus:border-app-border-strong focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="font-mono text-[11px] tracking-[0.1em] uppercase text-app-text-muted">content</span>
+            <textarea
+              rows={5}
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              maxLength={2000}
+              className="mt-1 w-full resize-y rounded-md border border-app-border bg-app-surface px-3 py-2 font-mono text-[12.5px] leading-[1.5] text-app-text focus:border-app-border-strong focus:outline-none"
+            />
+          </label>
+          <label className="block">
+            <span className="font-mono text-[11px] tracking-[0.1em] uppercase text-app-text-muted">kind</span>
+            <select
+              value={kind}
+              onChange={(e) => setKind(e.target.value)}
+              className="mt-1 w-full rounded-md border border-app-border bg-app-surface px-3 py-1.5 font-mono text-[12.5px] text-app-text focus:border-app-border-strong focus:outline-none"
+            >
+              <option value="">(none)</option>
+              <option value="preference">preference</option>
+              <option value="fact">fact</option>
+              <option value="project">project</option>
+              <option value="reference">reference</option>
+            </select>
+          </label>
+        </div>
+      }
+      onCancel={onCancel}
+      onConfirm={() => onConfirm({ name, content, kind: kind || null })}
+    />
   );
 }
 
@@ -1378,6 +2040,9 @@ function WelcomeScreen({
   installedSlugs,
   onTryAdapter,
   workspacePath,
+  tokenUsage,
+  attachments,
+  onRemoveAttachment,
 }: {
   input: string;
   onInputChange: (v: string) => void;
@@ -1395,6 +2060,9 @@ function WelcomeScreen({
   installedSlugs: Set<string>;
   onTryAdapter: (adapter: StoreAdapter) => void;
   workspacePath: string | null;
+  tokenUsage: { used: number; limit: number };
+  attachments: Attachment[];
+  onRemoveAttachment: (id: string) => void;
 }) {
   const ready = !!baseSha;
   const eyebrow = `${adapter ?? "no adapter"} · ${baseLabel} · ${
@@ -1483,6 +2151,9 @@ function WelcomeScreen({
           onPickAdapter={onPickAdapter}
           baseSha={baseSha}
           workspacePath={workspacePath}
+          tokenUsage={tokenUsage}
+          attachments={attachments}
+          onRemoveAttachment={onRemoveAttachment}
         />
       </div>
     </div>
@@ -1510,6 +2181,7 @@ function ChatView({
   baseLabel,
   baseLoaded,
   baseSha,
+  showThinkingInline,
   adapters,
   adapter,
   onPickAdapter,
@@ -1528,6 +2200,9 @@ function ChatView({
   onPickPreset,
   workspace,
   onPickWorkspace,
+  tokenUsage,
+  attachments,
+  onRemoveAttachment,
 }: {
   messages: AnyMessage[];
   input: string;
@@ -1538,6 +2213,7 @@ function ChatView({
   baseLabel: string;
   baseLoaded: boolean;
   baseSha: string | null;
+  showThinkingInline: boolean;
   adapters: { name: string }[];
   adapter: string | null;
   onPickAdapter: (n: string | null) => void;
@@ -1556,6 +2232,9 @@ function ChatView({
   onPickPreset: (p: Preset) => void;
   workspace: Workspace | null;
   onPickWorkspace: () => void;
+  tokenUsage: { used: number; limit: number };
+  attachments: Attachment[];
+  onRemoveAttachment: (id: string) => void;
 }) {
   const lastAssistantId = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -1603,6 +2282,10 @@ function ChatView({
       rendered.push(<ToolTurn key={m.id} message={m} />);
       continue;
     }
+    if (m.role === "memory_chip") {
+      rendered.push(<MemoryChip key={m.id} message={m} />);
+      continue;
+    }
     rendered.push(
       <MessageTurn
         key={m.id}
@@ -1612,6 +2295,7 @@ function ChatView({
         canStop={m.id === pendingAssistantId && canStop}
         onStop={onStop}
         baseLabel={baseLabel}
+        showThinkingInline={showThinkingInline}
       />,
     );
   }
@@ -1652,6 +2336,9 @@ function ChatView({
           onPickPreset={onPickPreset}
           baseSha={baseSha}
           workspacePath={workspace?.root ?? null}
+          tokenUsage={tokenUsage}
+          attachments={attachments}
+          onRemoveAttachment={onRemoveAttachment}
         />
         {computerUseMode && (
           <WorkspaceFooter
@@ -1674,6 +2361,7 @@ function MessageTurn({
   canStop,
   onStop,
   baseLabel,
+  showThinkingInline,
 }: {
   message: Message;
   canRegenerate?: boolean;
@@ -1681,6 +2369,7 @@ function MessageTurn({
   canStop?: boolean;
   onStop?: () => void;
   baseLabel: string;
+  showThinkingInline: boolean;
 }) {
   if (message.role === "system") {
     return (
@@ -1723,6 +2412,9 @@ function MessageTurn({
       )}
     </>
   );
+  const parsed = showThinkingInline
+    ? null
+    : parseThinking(message.text, !message.pending);
   return (
     <TurnRow
       kind="assistant"
@@ -1731,14 +2423,16 @@ function MessageTurn({
       metaLines={[message.pending ? "streaming…" : undefined, baseLabel]}
       actions={message.pending || canRegenerate ? actions : null}
     >
+      {parsed?.thought && (
+        <ThoughtDisclosure thought={parsed.thought} phase={parsed.phase} />
+      )}
       <div className="max-w-[760px] text-[14px] leading-[1.6] text-app-text">
-        {message.text ? (
-          <Markdown>{message.text}</Markdown>
-        ) : message.pending ? (
-          <span className="text-app-text-faint">…</span>
-        ) : (
-          ""
-        )}
+        {(() => {
+          const body = parsed ? parsed.answer : message.text;
+          if (body) return <Markdown>{body}</Markdown>;
+          if (message.pending) return <span className="text-app-text-faint">…</span>;
+          return "";
+        })()}
       </div>
     </TurnRow>
   );
@@ -1751,6 +2445,35 @@ function ToolTurn({ message }: { message: ToolCallMessage }) {
         <ToolCallBubble message={message} />
       </div>
     </TurnRow>
+  );
+}
+
+function MemoryChip({ message }: { message: MemoryChipMessage }) {
+  const tone =
+    message.status === "saved"
+      ? "border-app-accent/40 bg-app-accent/5 text-app-accent"
+      : message.status === "denied"
+        ? "border-app-border bg-app-surface text-app-text-faint"
+        : "border-red-500/40 bg-red-500/5 text-red-400";
+  const verb =
+    message.status === "saved"
+      ? "saved memory"
+      : message.status === "denied"
+        ? "memory not saved"
+        : "memory error";
+  return (
+    <div className="px-[calc(var(--turn-gutter)+18px)] py-1">
+      <span
+        className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] tracking-[0.02em] ${tone}`}
+        title={message.detail ?? ""}
+      >
+        <span className="uppercase text-[9.5px] tracking-[0.12em] opacity-70">{verb}</span>
+        <span className="truncate max-w-[40ch] text-app-text">{message.name}</span>
+        {message.kind && (
+          <span className="text-app-text-faint">· {message.kind}</span>
+        )}
+      </span>
+    </div>
   );
 }
 
