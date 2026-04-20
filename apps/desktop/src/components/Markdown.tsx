@@ -1,7 +1,10 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
 import "highlight.js/styles/github-dark.css";
+import "katex/dist/katex.min.css";
 
 const COMPONENTS = {
   // Inline code (`foo`) — distinguish from block code via the `inline` flag.
@@ -79,8 +82,11 @@ const COMPONENTS = {
 export function Markdown({ children }: { children: string }) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[
+        [rehypeHighlight, { detect: true, ignoreMissing: true }],
+        rehypeKatex,
+      ]}
       components={COMPONENTS}
     >
       {children}
