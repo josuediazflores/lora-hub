@@ -1,0 +1,4 @@
+outputs/
+.cache/
+*.log
+wandb/

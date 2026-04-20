@@ -1,0 +1,73 @@
+# Gemma 4 E2B — Sky-T1 reasoning-distill LoRA
+# Expected runtime on 1× MI300X: ~1.5 h for 2 epochs at seq_len 4096.
+
+base_model: google/gemma-4-E2B-it
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+# Sky-T1 is ShareGPT-style: `system` + `conversations` (from/value turns).
+# chat_template: gemma re-wraps each conversation with Gemma's turn
+# markers so the model sees the format it was trained on.
+datasets:
+  - path: NovaSky-AI/Sky-T1_data_17k
+    type: chat_template
+    chat_template: gemma
+    field_messages: conversations
+    message_field_role: from
+    message_field_content: value
+    roles:
+      user: [human, user]
+      assistant: [gpt, assistant]
+      system: [system]
+
+# Pull `system` out of the top-level row into a leading system message.
+system_prompt: '{system}'
+
+val_set_size: 0.02
+output_dir: ./outputs/gemma4-e2b-skyt1
+
+adapter: lora
+lora_r: 32
+lora_alpha: 64
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+sequence_len: 4096
+sample_packing: true
+pad_to_sequence_len: true
+
+# MI300X has 192 GB — no need for 4-bit quant, keep weights in bf16 and
+# save the quality. Effective batch = micro_batch × grad_accum = 16.
+bf16: true
+fp16: false
+gradient_checkpointing: true
+micro_batch_size: 8
+gradient_accumulation_steps: 2
+
+num_epochs: 2
+optimizer: adamw_torch
+learning_rate: 2.0e-4
+lr_scheduler: cosine
+warmup_ratio: 0.03
+weight_decay: 0.0
+
+logging_steps: 20
+evals_per_epoch: 2
+saves_per_epoch: 2
+save_total_limit: 3
+
+# SDPA works on ROCm out of the box; skip flash-attn until AITER
+# is verified on the specific driver.
+flash_attention: false
+sdp_attention: true
+
+# Optional: uncomment once you have a wandb account set up.
+# wandb_project: lora-hub
+# wandb_run_id: gemma4-e2b-skyt1
