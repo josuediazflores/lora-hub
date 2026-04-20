@@ -1,4 +1,5 @@
-import { Columns2, Paperclip, X } from "lucide-react";
+import { Columns2, Paperclip } from "lucide-react";
+import { AttachmentChip } from "./AttachmentChip";
 import { CommandPicker, type CommandPickerItem } from "./CommandPicker";
 import { ModeChip } from "./ModeChip";
 import { PermissionsPicker } from "./PermissionsPicker";
@@ -40,6 +41,8 @@ type Props = {
   /** Files dragged onto the window, about to be sent with the next turn. */
   attachments?: Attachment[];
   onRemoveAttachment?: (id: string) => void;
+  /** Called when the attach button is clicked. Opens a native file picker. */
+  onPickFiles?: () => void;
 };
 
 export function Composer({
@@ -68,6 +71,7 @@ export function Composer({
   tokenUsage,
   attachments = [],
   onRemoveAttachment,
+  onPickFiles,
 }: Props) {
   const showAdapterPicker = adapters.length > 0 && !!onPickAdapter;
   const showBasePicker = bases.length > 1 && !!onPickBase;
@@ -139,8 +143,10 @@ export function Composer({
         <div className="mt-1.5 flex items-center gap-1.5 border-t border-dashed border-app-border pt-1.5 font-mono text-[11px] text-app-text-muted">
           <button
             type="button"
-            className="flex items-center gap-1 rounded-md border border-app-border px-2 py-1 text-app-text-muted hover:border-app-border-strong hover:bg-app-surface-hover hover:text-app-text"
-            title="Attach (coming soon)"
+            onClick={onPickFiles}
+            disabled={!onPickFiles}
+            className="flex items-center gap-1 rounded-md border border-app-border px-2 py-1 text-app-text-muted hover:border-app-border-strong hover:bg-app-surface-hover hover:text-app-text disabled:cursor-not-allowed disabled:opacity-50"
+            title="Attach a file"
           >
             <Paperclip size={11} strokeWidth={2} />
             attach
@@ -270,77 +276,6 @@ function formatTokens(n: number): string {
   if (n >= 10_000) return `${(n / 1000).toFixed(1)}k`;
   if (n >= 1_000) return `${(n / 1000).toFixed(2)}k`;
   return String(n);
-}
-
-/** Attachment preview: thumbnail for images, document-glyph + filename
- * for everything else. Truncation and error states are shown in the
- * subtitle line so you know what got through and what didn't. */
-function AttachmentChip({
-  attachment,
-  onRemove,
-}: {
-  attachment: Attachment;
-  onRemove: () => void;
-}) {
-  const isError = attachment.kind === "unsupported";
-  const subtitleParts: string[] = [];
-  if (attachment.size > 0) subtitleParts.push(formatBytes(attachment.size));
-  if (attachment.kind === "pdf") subtitleParts.push("pdf · text extracted");
-  if (attachment.kind === "text") subtitleParts.push("text");
-  if (attachment.kind === "image") subtitleParts.push(attachment.mime || "image");
-  if (attachment.truncated) subtitleParts.push("truncated");
-  if (isError) subtitleParts.push(attachment.reason ?? "unsupported");
-
-  return (
-    <div
-      className={`group flex items-center gap-2 rounded-md border px-2 py-1 ${
-        isError
-          ? "border-red-500/40 bg-red-500/5"
-          : "border-app-border bg-app-surface"
-      }`}
-    >
-      {attachment.kind === "image" && attachment.data_url ? (
-        <img
-          src={attachment.data_url}
-          alt={attachment.name}
-          className="h-7 w-7 rounded object-cover"
-        />
-      ) : (
-        <div className="flex h-7 w-7 items-center justify-center rounded bg-app-bg">
-          <Paperclip size={12} strokeWidth={1.8} className="text-app-text-faint" />
-        </div>
-      )}
-      <div className="min-w-0 max-w-[180px]">
-        <div
-          className={`truncate font-mono text-[11px] ${
-            isError ? "text-red-400" : "text-app-text"
-          }`}
-          title={attachment.name}
-        >
-          {attachment.name}
-        </div>
-        {subtitleParts.length > 0 && (
-          <div className="truncate font-mono text-[10px] text-app-text-faint">
-            {subtitleParts.join(" · ")}
-          </div>
-        )}
-      </div>
-      <button
-        type="button"
-        onClick={onRemove}
-        title="Remove"
-        className="rounded p-0.5 text-app-text-faint opacity-60 hover:bg-app-surface-hover hover:opacity-100"
-      >
-        <X size={12} strokeWidth={2} />
-      </button>
-    </div>
-  );
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function Kbd({ children }: { children: React.ReactNode }) {

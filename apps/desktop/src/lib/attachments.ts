@@ -1,6 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type AttachmentKind = "text" | "pdf" | "image" | "unsupported";
+export type AttachmentKind =
+  | "text"
+  | "pdf"
+  | "image"
+  | "docx"
+  | "rtf"
+  | "xlsx"
+  | "pptx"
+  | "unsupported";
 
 export type Attachment = {
   /** Client-side id so React can key the list. */
@@ -35,7 +43,14 @@ export function formatAttachmentsForPrompt(
   if (attachments.length === 0) return "";
   const blocks = attachments.map((a) => {
     const header = `[attachment: ${a.name}]`;
-    if (a.kind === "text" || a.kind === "pdf") {
+    if (
+      a.kind === "text" ||
+      a.kind === "pdf" ||
+      a.kind === "docx" ||
+      a.kind === "rtf" ||
+      a.kind === "xlsx" ||
+      a.kind === "pptx"
+    ) {
       const lang = languageHintFor(a.name, a.mime);
       const fence = "```";
       return `${header}\n${fence}${lang}\n${a.text ?? ""}\n${fence}`;
@@ -103,6 +118,14 @@ function languageHintFor(name: string, mime: string): string {
     case "csv":
       return "csv";
     case "pdf":
+      return "";
+    case "xlsx":
+      // We flatten xlsx to tab-separated rows per sheet; `csv` gives a
+      // reasonable syntax highlight in the rendered transcript.
+      return "csv";
+    case "docx":
+    case "rtf":
+    case "pptx":
       return "";
     default:
       break;

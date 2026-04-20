@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, Check, Download } from "lucide-react";
 import type { StoreBase } from "../lib/store";
+import { describeBase } from "../lib/base-descriptions";
 import { memoryFit, systemMemoryBytes, type MemoryFit } from "../lib/system";
 
 type Props = {
@@ -59,11 +60,9 @@ export function ModelsView({ bases, activeBaseId, busy, onLoad, onBack }: Props)
                       {b.family} · {b.parameters} · {b.quant} ·{" "}
                       {formatBytes(b.size_bytes)} · {b.license}
                     </div>
-                    {b.description && (
-                      <p className="mt-2 text-[13px] leading-[1.5] text-app-text-muted">
-                        {b.description}
-                      </p>
-                    )}
+                    <p className="mt-2 text-[13px] leading-[1.5] text-app-text-muted">
+                      {b.description || describeBase(b)}
+                    </p>
                   </div>
                   <button
                     onClick={() => onLoad(b)}

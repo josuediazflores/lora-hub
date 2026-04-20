@@ -10,6 +10,7 @@ import {
   type Settings,
 } from "./components/SettingsPanel";
 import { Sidebar, type Conversation, type SidebarView } from "./components/Sidebar";
+import { AttachmentCard } from "./components/AttachmentCard";
 import { Composer } from "./components/Composer";
 import { QuickChips, defaultChips } from "./components/QuickChips";
 import { StoreLanding } from "./components/StoreLanding";
@@ -63,19 +64,102 @@ import type { StoreAdapter, StoreBase } from "./lib/store";
 
 const USER_NAME = "Josue Diaz Flores";
 
+// Every mlx-community Gemma 4 instruct variant across the four sizes
+// (E2B, E4B, 26B-A4B, 31B) and every quant mlx-community publishes:
+// 4bit, 5bit, 6bit, 8bit, mxfp4, mxfp8, bf16. nvfp4 is intentionally
+// skipped — it's an NVIDIA FP4 format and can't run on MLX/Apple
+// Silicon. Ordered by family size first, then by quant (smallest →
+// largest). `base_sha` is the content fingerprint computed by the
+// sidecar on first load; we leave it empty here and let the sidecar
+// fill it in on load — only adapter-compatibility checks consult it,
+// and they compare against the adapter's declared sha, not this list.
 const FALLBACK_BASES: StoreBase[] = [
+  // ── E2B (~2B effective) ──────────────────────────────────────────
   {
-    base_id: "gemma-3-4b-it-4bit",
-    name: "Gemma 3 4B Instruct (4-bit)",
+    base_id: "gemma-4-e2b-it-4bit",
+    name: "Gemma 4 E2B Instruct (4-bit)",
     family: "gemma",
-    parameters: "4B",
+    parameters: "E2B",
     quant: "4bit",
-    base_sha: "3c72eea5a3416fddcf25ab022c949956b51d5a0ebb6f80e624f2dac04cdeb698",
-    hf_repo: "mlx-community/gemma-3-4b-it-4bit",
-    size_bytes: 2_500_000_000,
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e2b-it-4bit",
+    size_bytes: 3_610_000_000,
     license: "Gemma Terms",
     description: "",
   },
+  {
+    base_id: "gemma-4-e2b-it-5bit",
+    name: "Gemma 4 E2B Instruct (5-bit)",
+    family: "gemma",
+    parameters: "E2B",
+    quant: "5bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e2b-it-5bit",
+    size_bytes: 4_190_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e2b-it-mxfp4",
+    name: "Gemma 4 E2B Instruct (mxfp4)",
+    family: "gemma",
+    parameters: "E2B",
+    quant: "mxfp4",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e2b-it-mxfp4",
+    size_bytes: 4_300_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e2b-it-6bit",
+    name: "Gemma 4 E2B Instruct (6-bit)",
+    family: "gemma",
+    parameters: "E2B",
+    quant: "6bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e2b-it-6bit",
+    size_bytes: 4_770_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e2b-it-mxfp8",
+    name: "Gemma 4 E2B Instruct (mxfp8)",
+    family: "gemma",
+    parameters: "E2B",
+    quant: "mxfp8",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e2b-it-mxfp8",
+    size_bytes: 5_790_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e2b-it-8bit",
+    name: "Gemma 4 E2B Instruct (8-bit)",
+    family: "gemma",
+    parameters: "E2B",
+    quant: "8bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e2b-it-8bit",
+    size_bytes: 5_930_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e2b-it-bf16",
+    name: "Gemma 4 E2B Instruct (bf16)",
+    family: "gemma",
+    parameters: "E2B",
+    quant: "bf16",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e2b-it-bf16",
+    size_bytes: 10_280_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  // ── E4B (~4B effective) ──────────────────────────────────────────
   {
     base_id: "gemma-4-e4b-it-4bit",
     name: "Gemma 4 E4B Instruct (4-bit)",
@@ -84,7 +168,249 @@ const FALLBACK_BASES: StoreBase[] = [
     quant: "4bit",
     base_sha: "769bec7273285355f6ba44a974df0e223fa7db7e3267e86b3e032ff006f792bc",
     hf_repo: "mlx-community/gemma-4-e4b-it-4bit",
-    size_bytes: 5_220_000_000,
+    size_bytes: 5_250_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e4b-it-5bit",
+    name: "Gemma 4 E4B Instruct (5-bit)",
+    family: "gemma",
+    parameters: "E4B",
+    quant: "5bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e4b-it-5bit",
+    size_bytes: 6_190_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e4b-it-mxfp4",
+    name: "Gemma 4 E4B Instruct (mxfp4)",
+    family: "gemma",
+    parameters: "E4B",
+    quant: "mxfp4",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e4b-it-mxfp4",
+    size_bytes: 6_770_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e4b-it-6bit",
+    name: "Gemma 4 E4B Instruct (6-bit)",
+    family: "gemma",
+    parameters: "E4B",
+    quant: "6bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e4b-it-6bit",
+    size_bytes: 7_120_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e4b-it-mxfp8",
+    name: "Gemma 4 E4B Instruct (mxfp8)",
+    family: "gemma",
+    parameters: "E4B",
+    quant: "mxfp8",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e4b-it-mxfp8",
+    size_bytes: 8_760_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e4b-it-8bit",
+    name: "Gemma 4 E4B Instruct (8-bit)",
+    family: "gemma",
+    parameters: "E4B",
+    quant: "8bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e4b-it-8bit",
+    size_bytes: 9_000_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-e4b-it-bf16",
+    name: "Gemma 4 E4B Instruct (bf16)",
+    family: "gemma",
+    parameters: "E4B",
+    quant: "bf16",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-e4b-it-bf16",
+    size_bytes: 16_020_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  // ── 26B-A4B (26B total, ~4B active; MoE) ─────────────────────────
+  {
+    base_id: "gemma-4-26b-a4b-it-mxfp4",
+    name: "Gemma 4 26B-A4B Instruct (mxfp4)",
+    family: "gemma",
+    parameters: "26B-A4B",
+    quant: "mxfp4",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-26b-a4b-it-mxfp4",
+    size_bytes: 29_420_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-26b-a4b-it-8bit",
+    name: "Gemma 4 26B-A4B Instruct (8-bit)",
+    family: "gemma",
+    parameters: "26B-A4B",
+    quant: "8bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-26b-a4b-it-8bit",
+    size_bytes: 27_990_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-26b-a4b-it-4bit",
+    name: "Gemma 4 26B-A4B Instruct (4-bit)",
+    family: "gemma",
+    parameters: "26B-A4B",
+    quant: "4bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-26b-a4b-it-4bit",
+    size_bytes: 30_980_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-26b-a4b-it-5bit",
+    name: "Gemma 4 26B-A4B Instruct (5-bit)",
+    family: "gemma",
+    parameters: "26B-A4B",
+    quant: "5bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-26b-a4b-it-5bit",
+    size_bytes: 37_220_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-26b-a4b-it-6bit",
+    name: "Gemma 4 26B-A4B Instruct (6-bit)",
+    family: "gemma",
+    parameters: "26B-A4B",
+    quant: "6bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-26b-a4b-it-6bit",
+    size_bytes: 43_460_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-26b-a4b-it-bf16",
+    name: "Gemma 4 26B-A4B Instruct (bf16)",
+    family: "gemma",
+    parameters: "26B-A4B",
+    quant: "bf16",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-26b-a4b-it-bf16",
+    size_bytes: 51_640_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-26b-a4b-it-mxfp8",
+    name: "Gemma 4 26B-A4B Instruct (mxfp8)",
+    family: "gemma",
+    parameters: "26B-A4B",
+    quant: "mxfp8",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-26b-a4b-it-mxfp8",
+    size_bytes: 53_860_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  // ── 31B (dense) ──────────────────────────────────────────────────
+  {
+    base_id: "gemma-4-31b-it-mxfp4",
+    name: "Gemma 4 31B Instruct (mxfp4)",
+    family: "gemma",
+    parameters: "31B",
+    quant: "mxfp4",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-31b-it-mxfp4",
+    size_bytes: 17_480_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-31b-it-5bit",
+    name: "Gemma 4 31B Instruct (5-bit)",
+    family: "gemma",
+    parameters: "31B",
+    quant: "5bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-31b-it-5bit",
+    size_bytes: 22_280_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-31b-it-6bit",
+    name: "Gemma 4 31B Instruct (6-bit)",
+    family: "gemma",
+    parameters: "31B",
+    quant: "6bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-31b-it-6bit",
+    size_bytes: 26_120_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-31b-it-mxfp8",
+    name: "Gemma 4 31B Instruct (mxfp8)",
+    family: "gemma",
+    parameters: "31B",
+    quant: "mxfp8",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-31b-it-mxfp8",
+    size_bytes: 32_840_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-31b-it-8bit",
+    name: "Gemma 4 31B Instruct (8-bit)",
+    family: "gemma",
+    parameters: "31B",
+    quant: "8bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-31b-it-8bit",
+    size_bytes: 33_800_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-31b-it-4bit",
+    name: "Gemma 4 31B Instruct (4-bit)",
+    family: "gemma",
+    parameters: "31B",
+    quant: "4bit",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-31b-it-4bit",
+    size_bytes: 36_860_000_000,
+    license: "Gemma Terms",
+    description: "",
+  },
+  {
+    base_id: "gemma-4-31b-it-bf16",
+    name: "Gemma 4 31B Instruct (bf16)",
+    family: "gemma",
+    parameters: "31B",
+    quant: "bf16",
+    base_sha: "",
+    hf_repo: "mlx-community/gemma-4-31b-it-bf16",
+    size_bytes: 62_580_000_000,
     license: "Gemma Terms",
     description: "",
   },
@@ -94,6 +420,11 @@ type Message = {
   id: string;
   role: "user" | "assistant" | "system";
   text: string;
+  /** Files the user attached to this turn. User messages only. Rendered
+   * as cards next to the text bubble; the extracted bodies are folded
+   * into the prompt the model sees via buildHistory, so the stored
+   * `text` stays clean (just what the user typed). */
+  attachments?: Attachment[];
   adapter?: string | null;
   pending?: boolean;
   progress?: { desc: string; percent: number; n: number; total: number } | null;
@@ -202,7 +533,11 @@ function cleanOnLoad(m: AnyMessage): AnyMessage {
     const status = m.status === "pending" ? "denied" : m.status;
     return { ...m, output, status };
   }
-  return { ...m, progress: null, pending: false };
+  // Drop image `data_url`s from stored attachments — base64'd images are
+  // the real bloat risk for localStorage. The card still renders from
+  // name/kind/size and the extracted text survives for follow-up turns.
+  const attachments = m.attachments?.map((a) => ({ ...a, data_url: undefined }));
+  return { ...m, progress: null, pending: false, attachments };
 }
 
 /** Fold chat history into sidecar-ready turns. Comparison messages collapse
@@ -248,7 +583,14 @@ function buildHistory(
         }]\n${resultText}`,
       });
     } else if (m.role === "user" || m.role === "assistant") {
-      const content = m.text.trim();
+      // Re-assemble the user-visible text with any attachment bodies at
+      // history-build time. Stored `text` stays clean for the transcript;
+      // the model sees the full fenced-block formatting it was trained on.
+      let content = m.text;
+      if (m.role === "user" && m.attachments && m.attachments.length) {
+        content = content + formatAttachmentsForPrompt(m.attachments);
+      }
+      content = content.trim();
       if (content) out.push({ role: m.role, content });
     }
   }
@@ -287,6 +629,14 @@ function estimateMessageTokens(messages: AnyMessage[]): number {
       continue;
     } else {
       sum += estimateTokens(m.text) + 4; // + role overhead
+      if (m.role === "user" && m.attachments) {
+        // Attachment bodies are re-injected into the prompt at history
+        // time; their text counts toward the context window even though
+        // the stored `text` doesn't contain them.
+        for (const a of m.attachments) {
+          sum += estimateTokens(a.text ?? "") + 8;
+        }
+      }
     }
   }
   return sum;
@@ -586,6 +936,37 @@ function App() {
 
   function removeAttachment(id: string) {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
+  }
+
+  /** Open the OS file picker and funnel results through the same
+   * read-attachment path as drag-drop, so every attachment — typed or
+   * dropped — goes through one code path. */
+  async function pickFiles() {
+    try {
+      const picked = await openDialog({ multiple: true });
+      if (!picked) return;
+      const paths = Array.isArray(picked) ? picked : [picked];
+      for (const p of paths) {
+        try {
+          const a = await readAttachment(p);
+          setAttachments((prev) => [...prev, a]);
+        } catch (e) {
+          setAttachments((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              kind: "unsupported",
+              name: p.split("/").pop() ?? p,
+              size: 0,
+              mime: "",
+              reason: String(e),
+            },
+          ]);
+        }
+      }
+    } catch (e) {
+      pushSystem(`File picker failed: ${String(e)}`);
+    }
   }
 
   // Global keyboard: Cmd+K (macOS) / Ctrl+K (cross-platform) toggles the
@@ -1037,35 +1418,40 @@ function App() {
       pushSystem("Load the base model first.");
       return;
     }
-    const prompt = (typed || "(see attachment)") + formatAttachmentsForPrompt(attachments);
     const currentAttachments = attachments;
     setAttachments([]);
     if (compareMode && status?.active_adapter) {
-      return handleSendCompare(prompt, status.active_adapter);
+      return handleSendCompare(typed, status.active_adapter, currentAttachments);
     }
     if (computerUseMode) {
-      // Restore the user's typed text into history via runAgentTurn's own
-      // path; the prompt already includes the attachment body.
-      return runAgentTurn(prompt);
+      return runAgentTurn(typed, currentAttachments);
     }
     setInput("");
-    // Silence unused-var — consumed upstream; future attachments panel may
-    // reference `currentAttachments` directly for render metadata.
-    void currentAttachments;
-    await runNormalTurn(prompt, status?.active_adapter ?? null);
+    await runNormalTurn(typed, status?.active_adapter ?? null, currentAttachments);
   }
 
-  async function runNormalTurn(prompt: string, adapter: string | null) {
+  async function runNormalTurn(
+    userText: string,
+    adapter: string | null,
+    attachments: Attachment[] = [],
+  ) {
     setBusy(true);
+
+    // The user-visible turn (stored text) is just what they typed.
+    // The prompt the model sees also carries each attachment as a
+    // fenced code block so it can reason over the file bodies.
+    const promptForModel =
+      userText + formatAttachmentsForPrompt(attachments);
 
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: "user",
-      text: prompt,
+      text: userText,
+      attachments: attachments.length ? attachments : undefined,
     };
     patchActiveChat((c) => ({
       ...c,
-      title: c.title || prompt.slice(0, 48),
+      title: c.title || (userText || attachments[0]?.name || "").slice(0, 48),
       messages: [...c.messages, userMsg],
     }));
 
@@ -1092,7 +1478,7 @@ function App() {
       settings.systemPrompt,
       settings.useMemoryInContext ? memories : [],
     );
-    let currentPrompt = prompt;
+    let currentPrompt = promptForModel;
     const MAX_STEPS = allowedToolNames.size > 0 ? 4 : 1;
 
     try {
@@ -1227,7 +1613,10 @@ function App() {
     }
   }
 
-  async function runAgentTurn(prompt: string) {
+  async function runAgentTurn(
+    userText: string,
+    attachments: Attachment[] = [],
+  ) {
     if (!workspace) {
       pushSystem(
         "Pick a workspace before running Computer Use — use the footer bar under the composer.",
@@ -1238,19 +1627,23 @@ function App() {
     setInput("");
     setBusy(true);
 
+    const promptForModel =
+      userText + formatAttachmentsForPrompt(attachments);
+
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: "user",
-      text: prompt,
+      text: userText,
+      attachments: attachments.length ? attachments : undefined,
     };
     patchActiveChat((c) => ({
       ...c,
-      title: c.title || prompt.slice(0, 48),
+      title: c.title || (userText || attachments[0]?.name || "").slice(0, 48),
       messages: [...c.messages, userMsg],
     }));
 
     let history: sidecar.ChatMessage[] = buildHistory(activeChat.messages, settings.systemPrompt, settings.useMemoryInContext ? memories : []);
-    let currentPrompt = prompt;
+    let currentPrompt = promptForModel;
     const adapter = status?.active_adapter ?? null;
     const MAX_STEPS = 8;
     let stopped: "ok" | "error" | "aborted" | "maxsteps" = "ok";
@@ -1422,20 +1815,28 @@ function App() {
     }
   }
 
-  async function handleSendCompare(prompt: string, adapter: string) {
+  async function handleSendCompare(
+    userText: string,
+    adapter: string,
+    attachments: Attachment[] = [],
+  ) {
     setInput("");
     setBusy(true);
+
+    const promptForModel =
+      userText + formatAttachmentsForPrompt(attachments);
 
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: "user",
-      text: prompt,
+      text: userText,
+      attachments: attachments.length ? attachments : undefined,
     };
     const compareId = crypto.randomUUID();
     const compareMsg: ComparisonMessage = {
       id: compareId,
       role: "comparison",
-      prompt,
+      prompt: userText,
       adapter,
       baseText: "",
       adapterText: "",
@@ -1443,7 +1844,7 @@ function App() {
     };
     patchActiveChat((c) => ({
       ...c,
-      title: c.title || prompt.slice(0, 48),
+      title: c.title || (userText || attachments[0]?.name || "").slice(0, 48),
       messages: [...c.messages, userMsg, compareMsg],
     }));
 
@@ -1460,7 +1861,7 @@ function App() {
       }));
     }
 
-    const baseHandle = sidecar.generate(prompt, {
+    const baseHandle = sidecar.generate(promptForModel, {
       baseOnly: true,
       messages: history,
       temperature: settings.temperature,
@@ -1491,7 +1892,7 @@ function App() {
 
     patchCompare((m) => ({ ...m, pending: "adapter" }));
 
-    const adapterHandle = sidecar.generate(prompt, {
+    const adapterHandle = sidecar.generate(promptForModel, {
       adapter,
       messages: history,
       temperature: settings.temperature,
@@ -1538,7 +1939,9 @@ function App() {
     if (userIdx < 0) return;
     const userMessage = activeChat.messages[userIdx];
     if (userMessage.role !== "user") return;
-    const userPrompt = userMessage.text;
+    const userPrompt =
+      userMessage.text +
+      formatAttachmentsForPrompt(userMessage.attachments ?? []);
 
     // Truncate everything from the user message onward and re-add a fresh
     // user + pending assistant.
@@ -1864,6 +2267,7 @@ function App() {
             tokenUsage={tokenUsage}
             attachments={attachments}
             onRemoveAttachment={removeAttachment}
+            onPickFiles={pickFiles}
             chips={defaultChips({
               baseLoaded,
               adaptersInstalled: status?.adapters.length ?? 0,
@@ -1913,6 +2317,7 @@ function App() {
             tokenUsage={tokenUsage}
             attachments={attachments}
             onRemoveAttachment={removeAttachment}
+            onPickFiles={pickFiles}
           />
         )}
       </main>
@@ -2043,6 +2448,7 @@ function WelcomeScreen({
   tokenUsage,
   attachments,
   onRemoveAttachment,
+  onPickFiles,
 }: {
   input: string;
   onInputChange: (v: string) => void;
@@ -2063,6 +2469,7 @@ function WelcomeScreen({
   tokenUsage: { used: number; limit: number };
   attachments: Attachment[];
   onRemoveAttachment: (id: string) => void;
+  onPickFiles: () => void;
 }) {
   const ready = !!baseSha;
   const eyebrow = `${adapter ?? "no adapter"} · ${baseLabel} · ${
@@ -2154,6 +2561,7 @@ function WelcomeScreen({
           tokenUsage={tokenUsage}
           attachments={attachments}
           onRemoveAttachment={onRemoveAttachment}
+          onPickFiles={onPickFiles}
         />
       </div>
     </div>
@@ -2203,6 +2611,7 @@ function ChatView({
   tokenUsage,
   attachments,
   onRemoveAttachment,
+  onPickFiles,
 }: {
   messages: AnyMessage[];
   input: string;
@@ -2235,6 +2644,7 @@ function ChatView({
   tokenUsage: { used: number; limit: number };
   attachments: Attachment[];
   onRemoveAttachment: (id: string) => void;
+  onPickFiles: () => void;
 }) {
   const lastAssistantId = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -2339,6 +2749,7 @@ function ChatView({
           tokenUsage={tokenUsage}
           attachments={attachments}
           onRemoveAttachment={onRemoveAttachment}
+          onPickFiles={onPickFiles}
         />
         {computerUseMode && (
           <WorkspaceFooter
@@ -2389,11 +2800,22 @@ function MessageTurn({
     );
   }
   if (message.role === "user") {
+    const hasAttachments = !!message.attachments?.length;
+    const hasText = !!message.text;
     return (
       <TurnRow kind="user" title="you">
-        <div className="max-w-[760px] rounded-[10px] border border-app-border bg-app-surface px-3.5 py-2.5 text-[14px] leading-[1.55] whitespace-pre-wrap text-app-text">
-          {message.text || (message.pending ? "…" : "")}
-        </div>
+        {hasAttachments && (
+          <div className="mb-2 flex max-w-[760px] flex-wrap gap-2">
+            {message.attachments!.map((a) => (
+              <AttachmentCard key={a.id} attachment={a} />
+            ))}
+          </div>
+        )}
+        {(hasText || !hasAttachments) && (
+          <div className="max-w-[760px] rounded-[10px] border border-app-border bg-app-surface px-3.5 py-2.5 text-[14px] leading-[1.55] whitespace-pre-wrap text-app-text">
+            {message.text || (message.pending ? "…" : "")}
+          </div>
+        )}
       </TurnRow>
     );
   }
