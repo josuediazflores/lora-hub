@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowLeft, Trash2 } from "lucide-react";
+import { ArrowLeft, ChevronRight, Trash2 } from "lucide-react";
 import {
   type Memory,
   type MemoryInput,
@@ -57,7 +57,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoLoadLastBase: false,
   showThinkingInline: false,
   systemPrompt: "",
-  memoryWritePolicy: "ask",
+  memoryWritePolicy: "auto",
   useMemoryInContext: true,
   memoryInNormalChat: true,
   webToolsInNormalChat: true,
@@ -71,7 +71,15 @@ export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return DEFAULT_SETTINGS;
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw) as Partial<Settings>;
+    // Migrate installs that were on the old "ask" default to "auto". The
+    // old default caused a modal on every save_memory; users who'd never
+    // visited Settings had no way to know they could change it. Users
+    // who deliberately picked "off" are preserved.
+    if (parsed.memoryWritePolicy === "ask") {
+      parsed.memoryWritePolicy = "auto";
+    }
+    return { ...DEFAULT_SETTINGS, ...parsed };
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -596,20 +604,24 @@ function MemorySection({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<MemoryInput | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editsOpen, setEditsOpen] = useState(false);
 
   const bytes = totalBytes(memories);
   const nearLimit = bytes > MEMORY_LIMITS.maxTotalBytes * 0.8;
+  const grouped = groupMemoriesByKind(memories);
 
   function startNew() {
     setEditingId("__new__");
     setDraft({ name: "", content: "", kind: null, source: "user" });
     setError(null);
+    setEditsOpen(true);
   }
 
   function startEdit(m: Memory) {
     setEditingId(m.id);
     setDraft({ id: m.id, name: m.name, content: m.content, kind: m.kind ?? null, source: m.source ?? "user" });
     setError(null);
+    setEditsOpen(true);
   }
 
   async function commitDraft() {
@@ -626,137 +638,224 @@ function MemorySection({
 
   return (
     <div className="space-y-4">
-      <div>
-        <div className="mb-1.5 font-mono text-[11px] tracking-[0.1em] uppercase text-app-text-muted">
-          agent writes
-        </div>
-        <div className="inline-flex rounded-md border border-app-border bg-app-surface p-0.5">
-          {(["off", "ask", "auto"] as MemoryWritePolicy[]).map((p) => (
-            <button
-              key={p}
-              onClick={() => onPolicyChange(p)}
-              className={`rounded px-3 py-1 font-mono text-[11px] ${
-                policy === p
-                  ? "bg-app-accent text-white"
-                  : "text-app-text-muted hover:text-app-text"
-              }`}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-        <div className="mt-1 text-[12px] leading-[1.45] text-app-text-faint">
-          Whether the assistant may call <code>save_memory</code> on its own.{" "}
-          <strong>ask</strong> shows a confirmation modal with editable fields. <strong>auto</strong> skips
-          confirmation but still audits every write. Secret-like strings are always blocked.
-        </div>
-      </div>
+      <p className="text-[13px] leading-[1.5] text-app-text-muted">
+        Here's what your model remembers about you. This summary is grouped
+        by kind and updates as memories are saved — each entry below the
+        card can be edited or deleted individually.
+      </p>
 
-      <ToggleRow
-        label="use memory in context"
-        help="Prepend saved memories to the system context on every turn. Turn off to hide them from the model without deleting anything."
-        value={useInContext}
-        onChange={onUseInContextChange}
-      />
-
-      <ToggleRow
-        label="save during normal chat"
-        help="Let the model call save_memory outside Computer Use mode. Saves render as a small inline chip instead of a full tool bubble. Still respects the agent-writes policy above."
-        value={inNormalChat}
-        onChange={onInNormalChatChange}
-      />
-
-      <div className="flex items-center justify-between border-t border-app-border pt-3">
-        <span className="font-mono text-[10.5px] text-app-text-faint">
-          {memories.length} / {MEMORY_LIMITS.maxMemories} memories · {bytes} /{" "}
-          {MEMORY_LIMITS.maxTotalBytes} bytes{nearLimit ? " · near limit" : ""}
-        </span>
-        <button
-          onClick={startNew}
-          disabled={memories.length >= MEMORY_LIMITS.maxMemories || editingId === "__new__"}
-          className="rounded-md border border-app-border-strong px-2.5 py-1 font-mono text-[11px] text-app-text hover:bg-app-surface-hover disabled:opacity-50"
-        >
-          + add memory
-        </button>
-      </div>
-
-      {error && (
-        <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 font-mono text-[11px] text-red-400">
-          {error}
-        </div>
-      )}
-
-      {editingId === "__new__" && draft && (
-        <MemoryEditor
-          draft={draft}
-          onChange={setDraft}
-          onCancel={() => {
-            setEditingId(null);
-            setDraft(null);
-          }}
-          onSave={commitDraft}
-        />
-      )}
-
-      {memories.length === 0 && editingId !== "__new__" && (
-        <div className="rounded-md border border-dashed border-app-border px-3 py-4 text-[12.5px] leading-[1.5] text-app-text-faint">
-          No memories yet — add one here, or turn on agent-write and let the
-          model save durable facts it notices.
-        </div>
-      )}
-
-      <ul className="space-y-2">
-        {[...memories]
-          .sort((a, b) => b.updated_at - a.updated_at)
-          .map((m) => (
-            <li
-              key={m.id}
-              className="rounded-md border border-app-border bg-app-surface"
-            >
-              {editingId === m.id && draft ? (
-                <MemoryEditor
-                  draft={draft}
-                  onChange={setDraft}
-                  onCancel={() => {
-                    setEditingId(null);
-                    setDraft(null);
-                  }}
-                  onSave={commitDraft}
-                />
-              ) : (
-                <div className="flex items-start gap-2 px-3 py-2">
-                  <div className="flex-1 cursor-pointer" onClick={() => startEdit(m)}>
-                    <div className="flex items-baseline gap-2">
-                      <span className="font-mono text-[12px] text-app-text">{m.name}</span>
-                      {m.kind && (
-                        <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-app-text-faint">
-                          {m.kind}
-                        </span>
-                      )}
-                      {m.source?.startsWith("agent:") && (
-                        <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-app-accent">
-                          agent
-                        </span>
-                      )}
-                    </div>
-                    <div className="mt-0.5 truncate font-serif text-[13px] leading-[1.4] text-app-text-muted">
-                      {m.content}
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => void onDelete(m.id)}
-                    title="Delete memory"
-                    className="rounded p-1 text-app-text-faint hover:bg-app-surface-hover hover:text-red-400"
-                  >
-                    <Trash2 size={13} strokeWidth={1.8} />
-                  </button>
+      <div className="rounded-lg border border-app-border bg-app-surface p-5">
+        {memories.length === 0 ? (
+          <div className="text-[13px] leading-[1.5] text-app-text-faint">
+            No memories yet. Turn on <strong>agent writes</strong> below and
+            let the model save durable facts it notices, or add one manually
+            under Manage edits.
+          </div>
+        ) : (
+          <div className="space-y-5">
+            {grouped.map((g) => (
+              <div key={g.kind ?? "__unclassified__"}>
+                <h3 className="text-[14px] font-semibold text-app-text">
+                  {humanizeKind(g.kind)}
+                </h3>
+                <div className="mt-1.5 space-y-2 font-serif text-[13.5px] leading-[1.55] text-app-text">
+                  {g.memories.map((m) => (
+                    <p key={m.id}>{m.content}</p>
+                  ))}
                 </div>
-              )}
-            </li>
-          ))}
-      </ul>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setEditsOpen((v) => !v)}
+        className="flex w-full items-center justify-between rounded-md border border-app-border bg-app-surface px-3.5 py-2.5 text-left hover:bg-app-surface-hover"
+      >
+        <span className="text-[13px] text-app-text">Manage edits</span>
+        <span className="flex items-center gap-2 font-mono text-[11px] text-app-text-muted">
+          {memories.length}
+          <ChevronRight
+            size={14}
+            strokeWidth={2}
+            className={`transition-transform ${editsOpen ? "rotate-90" : ""}`}
+          />
+        </span>
+      </button>
+
+      {editsOpen && (
+        <div className="space-y-3 rounded-md border border-app-border bg-app-surface/50 p-3">
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-[10.5px] text-app-text-faint">
+              {memories.length} / {MEMORY_LIMITS.maxMemories} memories · {bytes} /{" "}
+              {MEMORY_LIMITS.maxTotalBytes} bytes
+              {nearLimit ? " · near limit" : ""}
+            </span>
+            <button
+              onClick={startNew}
+              disabled={memories.length >= MEMORY_LIMITS.maxMemories || editingId === "__new__"}
+              className="rounded-md border border-app-border-strong px-2.5 py-1 font-mono text-[11px] text-app-text hover:bg-app-surface-hover disabled:opacity-50"
+            >
+              + add memory
+            </button>
+          </div>
+
+          {error && (
+            <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 font-mono text-[11px] text-red-400">
+              {error}
+            </div>
+          )}
+
+          {editingId === "__new__" && draft && (
+            <MemoryEditor
+              draft={draft}
+              onChange={setDraft}
+              onCancel={() => {
+                setEditingId(null);
+                setDraft(null);
+              }}
+              onSave={commitDraft}
+            />
+          )}
+
+          {memories.length === 0 && editingId !== "__new__" && (
+            <div className="rounded-md border border-dashed border-app-border px-3 py-4 text-[12.5px] leading-[1.5] text-app-text-faint">
+              No memories yet.
+            </div>
+          )}
+
+          <ul className="space-y-2">
+            {[...memories]
+              .sort((a, b) => b.updated_at - a.updated_at)
+              .map((m) => (
+                <li
+                  key={m.id}
+                  className="rounded-md border border-app-border bg-app-surface"
+                >
+                  {editingId === m.id && draft ? (
+                    <MemoryEditor
+                      draft={draft}
+                      onChange={setDraft}
+                      onCancel={() => {
+                        setEditingId(null);
+                        setDraft(null);
+                      }}
+                      onSave={commitDraft}
+                    />
+                  ) : (
+                    <div className="flex items-start gap-2 px-3 py-2">
+                      <div className="flex-1 cursor-pointer" onClick={() => startEdit(m)}>
+                        <div className="flex items-baseline gap-2">
+                          <span className="font-mono text-[12px] text-app-text">{m.name}</span>
+                          {m.kind && (
+                            <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-app-text-faint">
+                              {m.kind}
+                            </span>
+                          )}
+                          {m.source?.startsWith("agent:") && (
+                            <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-app-accent">
+                              agent
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-0.5 truncate font-serif text-[13px] leading-[1.4] text-app-text-muted">
+                          {m.content}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => void onDelete(m.id)}
+                        title="Delete memory"
+                        className="rounded p-1 text-app-text-faint hover:bg-app-surface-hover hover:text-red-400"
+                      >
+                        <Trash2 size={13} strokeWidth={1.8} />
+                      </button>
+                    </div>
+                  )}
+                </li>
+              ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="space-y-4 border-t border-app-border pt-4">
+        <div>
+          <div className="mb-1.5 font-mono text-[11px] tracking-[0.1em] uppercase text-app-text-muted">
+            agent writes
+          </div>
+          <div className="inline-flex rounded-md border border-app-border bg-app-surface p-0.5">
+            {(["off", "ask", "auto"] as MemoryWritePolicy[]).map((p) => (
+              <button
+                key={p}
+                onClick={() => onPolicyChange(p)}
+                className={`rounded px-3 py-1 font-mono text-[11px] ${
+                  policy === p
+                    ? "bg-app-accent text-white"
+                    : "text-app-text-muted hover:text-app-text"
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+          <div className="mt-1 text-[12px] leading-[1.45] text-app-text-faint">
+            Whether the assistant may call <code>save_memory</code> on its own.{" "}
+            <strong>ask</strong> shows a confirmation modal with editable fields. <strong>auto</strong> skips
+            confirmation but still audits every write. Secret-like strings are always blocked.
+          </div>
+        </div>
+
+        <ToggleRow
+          label="use memory in context"
+          help="Prepend saved memories to the system context on every turn. Turn off to hide them from the model without deleting anything."
+          value={useInContext}
+          onChange={onUseInContextChange}
+        />
+
+        <ToggleRow
+          label="save during normal chat"
+          help="Let the model call save_memory outside Computer Use mode. Saves render as a small inline chip instead of a full tool bubble. Still respects the agent-writes policy above."
+          value={inNormalChat}
+          onChange={onInNormalChatChange}
+        />
+      </div>
     </div>
   );
+}
+
+function groupMemoriesByKind(memories: Memory[]): {
+  kind: string | null;
+  memories: Memory[];
+}[] {
+  // Preserve the order in which kinds first appear, so new kinds land at
+  // the bottom rather than shuffling every time a memory is added.
+  const byKind = new Map<string, Memory[]>();
+  for (const m of memories) {
+    const k = m.kind ?? "";
+    if (!byKind.has(k)) byKind.set(k, []);
+    byKind.get(k)!.push(m);
+  }
+  const result: { kind: string | null; memories: Memory[] }[] = [];
+  for (const [k, list] of byKind) {
+    // Within a kind, sort newest-last so the reader's eye lands on the
+    // oldest context first and the fresher facts build on top.
+    const sorted = [...list].sort((a, b) => a.updated_at - b.updated_at);
+    result.push({ kind: k === "" ? null : k, memories: sorted });
+  }
+  return result;
+}
+
+function humanizeKind(kind: string | null): string {
+  if (!kind) return "Notes";
+  // Title-case the kind and pluralize crude categories so the heading
+  // reads like a section title: "fact" → "Facts", "preference" →
+  // "Preferences", "identity" → "Identity" (no plural — already a mass noun).
+  const titled = kind.charAt(0).toUpperCase() + kind.slice(1);
+  if (kind === "fact" || kind === "preference" || kind === "interest" || kind === "goal") {
+    return `${titled}s`;
+  }
+  return titled;
 }
 
 function MemoryEditor({

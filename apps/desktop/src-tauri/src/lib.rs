@@ -1,5 +1,6 @@
 mod attachments;
 mod audit;
+mod cache;
 mod memory;
 mod permissions;
 mod sidecar;
@@ -236,6 +237,7 @@ pub fn run() {
             memory::memory_delete,
             memory::memory_tool_save,
             attachments::read_attachment,
+            cache::list_cached_hf_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

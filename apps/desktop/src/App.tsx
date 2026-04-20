@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { RefreshCw, Square } from "lucide-react";
+import { BookOpen, RefreshCw, Square } from "lucide-react";
 import { Markdown } from "./components/Markdown";
 import {
   SettingsPage,
@@ -59,6 +59,7 @@ import {
 } from "./lib/workspace";
 import * as sidecar from "./lib/sidecar";
 import * as store from "./lib/store";
+import { listCachedHfModels } from "./lib/cache";
 import { TOOL_DEFS, runTool } from "./lib/tools";
 import type { StoreAdapter, StoreBase } from "./lib/store";
 
@@ -709,6 +710,13 @@ function App() {
   );
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  // Which HF repos are materialized in ~/.cache/huggingface/hub. Used
+  // to flag Models-view rows that won't trigger a multi-GB download on
+  // click. Refetched on mount and after every successful base load.
+  const [cachedRepos, setCachedRepos] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    listCachedHfModels().then(setCachedRepos).catch(() => {});
+  }, []);
   const [dragOver, setDragOver] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settings, setSettings] = useState<Settings>(loadSettings);
@@ -1195,6 +1203,9 @@ function App() {
       }
     }
     await refreshStatus();
+    // A fresh download just landed in the HF cache; refresh the set so
+    // the Models view can flip its badge from "will download" → "downloaded".
+    listCachedHfModels().then(setCachedRepos).catch(() => {});
     setBusy(false);
   }
 
@@ -2181,6 +2192,7 @@ function App() {
             bases={bases}
             activeBaseId={activeBase?.base_id ?? null}
             busy={busy}
+            cachedRepos={cachedRepos}
             onLoad={requestLoadBase}
             onBack={() => setView("chat")}
           />
@@ -2871,30 +2883,41 @@ function ToolTurn({ message }: { message: ToolCallMessage }) {
 }
 
 function MemoryChip({ message }: { message: MemoryChipMessage }) {
-  const tone =
+  const labelTone =
     message.status === "saved"
-      ? "border-app-accent/40 bg-app-accent/5 text-app-accent"
+      ? "text-app-text-muted"
       : message.status === "denied"
-        ? "border-app-border bg-app-surface text-app-text-faint"
-        : "border-red-500/40 bg-red-500/5 text-red-400";
+        ? "text-app-text-faint"
+        : "text-red-400";
+  const lineTone =
+    message.status === "error" ? "bg-red-500/40" : "bg-app-border";
   const verb =
     message.status === "saved"
-      ? "saved memory"
+      ? "added to memory"
       : message.status === "denied"
         ? "memory not saved"
         : "memory error";
   return (
-    <div className="px-[calc(var(--turn-gutter)+18px)] py-1">
-      <span
-        className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] tracking-[0.02em] ${tone}`}
+    <div className="px-[calc(var(--turn-gutter)+18px)] py-1.5">
+      <div
+        className="flex items-center gap-3"
         title={message.detail ?? ""}
       >
-        <span className="uppercase text-[9.5px] tracking-[0.12em] opacity-70">{verb}</span>
-        <span className="truncate max-w-[40ch] text-app-text">{message.name}</span>
-        {message.kind && (
-          <span className="text-app-text-faint">· {message.kind}</span>
-        )}
-      </span>
+        <div className={`h-px flex-1 ${lineTone}`} />
+        <div
+          className={`flex items-center gap-1.5 font-mono text-[10.5px] tracking-[0.02em] ${labelTone}`}
+        >
+          <BookOpen size={11} strokeWidth={1.8} />
+          <span className="uppercase text-[9.5px] tracking-[0.12em] opacity-70">
+            {verb}
+          </span>
+          <span className="truncate max-w-[40ch] text-app-text">{message.name}</span>
+          {message.kind && (
+            <span className="text-app-text-faint">· {message.kind}</span>
+          )}
+        </div>
+        <div className={`h-px flex-1 ${lineTone}`} />
+      </div>
     </div>
   );
 }

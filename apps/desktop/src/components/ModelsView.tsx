@@ -8,15 +8,46 @@ type Props = {
   bases: StoreBase[];
   activeBaseId: string | null;
   busy: boolean;
+  /** Lowercased `org/repo` IDs of every HF model materialized on disk.
+   * Rows whose `hf_repo` is in this set render a "downloaded" badge
+   * so users can tell hot-loads from fresh downloads at a glance. */
+  cachedRepos: Set<string>;
   onLoad: (base: StoreBase) => void;
   onBack: () => void;
 };
 
-export function ModelsView({ bases, activeBaseId, busy, onLoad, onBack }: Props) {
+export function ModelsView({ bases, activeBaseId, busy, cachedRepos, onLoad, onBack }: Props) {
   const [totalMem, setTotalMem] = useState<number>(0);
+  const [search, setSearch] = useState("");
+  const [family, setFamily] = useState<string | null>(null);
+  const [onlyDownloaded, setOnlyDownloaded] = useState(false);
+  const [onlyFits, setOnlyFits] = useState(false);
   useEffect(() => {
     systemMemoryBytes().then(setTotalMem).catch(() => setTotalMem(0));
   }, []);
+
+  // Families come from the data — avoids hardcoding the list if we
+  // later add more (e.g. a Gemma 5 tier).
+  const families = Array.from(new Set(bases.map((b) => b.parameters)));
+
+  const filtered = bases.filter((b) => {
+    if (family && b.parameters !== family) return false;
+    if (onlyDownloaded && !cachedRepos.has(b.hf_repo.toLowerCase())) return false;
+    if (onlyFits && memoryFit(b.size_bytes, totalMem) !== "fits") return false;
+    if (search) {
+      const q = search.toLowerCase();
+      if (
+        !b.name.toLowerCase().includes(q) &&
+        !b.hf_repo.toLowerCase().includes(q) &&
+        !b.quant.toLowerCase().includes(q) &&
+        !b.parameters.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
+
   return (
     <div className="flex flex-1 flex-col">
       <header className="border-b border-app-border px-6 py-3">
@@ -30,14 +61,57 @@ export function ModelsView({ bases, activeBaseId, busy, onLoad, onBack }: Props)
           </button>
           <h2 className="text-[15px] font-semibold text-app-text">Models</h2>
           <span className="font-mono text-[11px] text-app-text-faint">
-            · {bases.length} curated base{bases.length === 1 ? "" : "s"}
+            · {filtered.length}
+            {filtered.length !== bases.length ? ` / ${bases.length}` : ""} curated
+            base{bases.length === 1 ? "" : "s"}
           </span>
         </div>
       </header>
 
+      <div className="border-b border-app-border px-6 py-3">
+        <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-2">
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="search"
+            className="w-36 rounded-md border border-app-border bg-app-surface px-2.5 py-1 font-mono text-[11px] text-app-text placeholder:text-app-text-faint focus:border-app-border-strong focus:outline-none"
+          />
+          <div className="inline-flex rounded-md border border-app-border bg-app-surface p-0.5">
+            <FamilyChip
+              label="all"
+              active={family === null}
+              onClick={() => setFamily(null)}
+            />
+            {families.map((f) => (
+              <FamilyChip
+                key={f}
+                label={f}
+                active={family === f}
+                onClick={() => setFamily(family === f ? null : f)}
+              />
+            ))}
+          </div>
+          <ToggleChip
+            label="downloaded"
+            active={onlyDownloaded}
+            onClick={() => setOnlyDownloaded((v) => !v)}
+          />
+          <ToggleChip
+            label="fits your Mac"
+            active={onlyFits}
+            onClick={() => setOnlyFits((v) => !v)}
+          />
+        </div>
+      </div>
+
       <div className="flex-1 overflow-y-auto px-6 py-5">
         <div className="mx-auto flex max-w-3xl flex-col gap-2">
-          {bases.map((b) => {
+          {filtered.length === 0 && (
+            <div className="rounded-md border border-dashed border-app-border px-4 py-6 text-center font-mono text-[11px] text-app-text-faint">
+              no models match the current filters
+            </div>
+          )}
+          {filtered.map((b) => {
             const active = b.base_id === activeBaseId;
             const fit = memoryFit(b.size_bytes, totalMem);
             return (
@@ -55,6 +129,7 @@ export function ModelsView({ bases, activeBaseId, busy, onLoad, onBack }: Props)
                         {b.name}
                       </h3>
                       <FitBadge fit={fit} />
+                      {cachedRepos.has(b.hf_repo.toLowerCase()) && <CachedBadge />}
                     </div>
                     <div className="mt-1 font-mono text-[11px] text-app-text-muted">
                       {b.family} · {b.parameters} · {b.quant} ·{" "}
@@ -103,6 +178,65 @@ function formatBytes(n: number): string {
   if (n >= 1e6) return `${(n / 1e6).toFixed(0)} MB`;
   if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;
   return `${n} B`;
+}
+
+function FamilyChip({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded px-2.5 py-1 font-mono text-[11px] transition-colors ${
+        active
+          ? "bg-app-accent text-white"
+          : "text-app-text-muted hover:text-app-text"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function ToggleChip({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-md border px-2.5 py-1 font-mono text-[11px] transition-colors ${
+        active
+          ? "border-app-accent/40 bg-app-accent/10 text-app-accent"
+          : "border-app-border bg-app-surface text-app-text-muted hover:text-app-text"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function CachedBadge() {
+  return (
+    <span
+      className="rounded-sm border border-app-border bg-app-surface-hover px-1.5 py-[1px] font-mono text-[10px] text-app-text-muted"
+      title="Already on disk — loading is instant, no re-download needed"
+    >
+      downloaded
+    </span>
+  );
 }
 
 function FitBadge({ fit }: { fit: MemoryFit }) {
