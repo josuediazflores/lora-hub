@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ToolDef } from "./sidecar";
+import { listMemories, type Memory } from "./memory";
 
 /**
  * Tool registry passed to the sidecar so the model sees a compact spec of
@@ -168,6 +169,99 @@ export const TOOL_DEFS: ToolDef[] = [
         type: "string",
         required: false,
         description: "preference | fact | project | reference",
+      },
+    },
+  },
+  {
+    name: "list_memories",
+    description:
+      "List persisted memories from the local store. Memories are long-lived notes saved via save_memory. Read-only.",
+    parameters: {
+      kind: {
+        type: "string",
+        required: false,
+        description: "Optional filter: preference | fact | project | reference",
+      },
+      limit: {
+        type: "number",
+        required: false,
+        description: "Cap on returned entries (default 20, max 50).",
+      },
+    },
+  },
+  {
+    name: "recall_memory",
+    description:
+      "Search persisted memories by substring (case-insensitive match against name + content). " +
+      "Returns matching entries with name, kind, and content. Use before answering questions " +
+      "that depend on anything the user previously asked you to remember.",
+    parameters: {
+      query: {
+        type: "string",
+        required: false,
+        description: "Substring to match. Empty/omitted returns all entries (same as list_memories).",
+      },
+      kind: {
+        type: "string",
+        required: false,
+        description: "Optional filter: preference | fact | project | reference",
+      },
+      limit: {
+        type: "number",
+        required: false,
+        description: "Cap on returned entries (default 10, max 50).",
+      },
+    },
+  },
+  {
+    name: "compare_outputs",
+    description:
+      "Run the same instruction through two lanes — each lane is either a specific adapter (by slug) " +
+      "or the plain base model (slug = null). Returns both outputs side-by-side so you can pick one " +
+      "or synthesize. Useful for A/B reasoning across LoRAs the user has installed. Each lane runs " +
+      "without conversation history, so include any context directly in `instruction`.",
+    parameters: {
+      instruction: {
+        type: "string",
+        required: true,
+        description: "Self-contained prompt sent to both lanes.",
+      },
+      slug_a: {
+        type: "string",
+        required: false,
+        description: "Lane A adapter slug. Omit or null for the base model.",
+      },
+      slug_b: {
+        type: "string",
+        required: false,
+        description: "Lane B adapter slug. Omit or null for the base model.",
+      },
+      max_tokens: {
+        type: "number",
+        required: false,
+        description: "Per-lane token cap (default uses current settings).",
+      },
+    },
+  },
+  {
+    name: "use_specialist",
+    description:
+      "Delegate a subtask to a specialist LoRA adapter. Pass a `slug` from the installed " +
+      "adapter catalog the user provided, or leave slug empty / `null` to run on the " +
+      "plain base model. `instruction` is the one-shot prompt the specialist receives — " +
+      "keep it self-contained; the specialist does not see prior conversation context. " +
+      "Returns the specialist's full response as a string. Use this to assemble " +
+      "multi-step answers where each step benefits from a different fine-tuned specialist.",
+    parameters: {
+      slug: {
+        type: "string",
+        required: false,
+        description: "Adapter slug from the installed catalog, or empty/null for the base model.",
+      },
+      instruction: {
+        type: "string",
+        required: true,
+        description: "Self-contained prompt for the specialist (includes any context it needs).",
       },
     },
   },
@@ -371,6 +465,51 @@ export async function runTool(
           output: `saved memory "${mem.name}"`,
         };
       }
+      case "list_memories": {
+        const kind = asOptionalString(args.kind);
+        const limit = clampLimit(args.limit, 20, 50);
+        const all = await listMemories();
+        const filtered = kind
+          ? all.filter((m) => (m.kind ?? "") === kind)
+          : all;
+        const out = formatMemoryList(filtered.slice(0, limit));
+        return { status: "success", output: out };
+      }
+      case "recall_memory": {
+        const query = asOptionalString(args.query)?.toLowerCase() ?? "";
+        const kind = asOptionalString(args.kind);
+        const limit = clampLimit(args.limit, 10, 50);
+        const all = await listMemories();
+        const filtered = all.filter((m) => {
+          if (kind && (m.kind ?? "") !== kind) return false;
+          if (!query) return true;
+          return (
+            m.name.toLowerCase().includes(query) ||
+            m.content.toLowerCase().includes(query)
+          );
+        });
+        const out = formatMemoryList(filtered.slice(0, limit));
+        return { status: "success", output: out };
+      }
+      case "compare_outputs":
+        // Intentional: this tool needs sidecar.generate + React state
+        // (settings, downloadedAdapters, status). Handled inside the turn
+        // runners that own that context. Reaching this branch = a config bug.
+        return {
+          status: "error",
+          error:
+            "compare_outputs must be handled by the calling turn runner, not runTool.",
+        };
+      case "use_specialist":
+        // Intentional: this tool can't dispatch via the Tauri invoke path
+        // because it needs to hot-swap the LoRA and call sidecar.generate
+        // directly. Handle it inside runSpecialistTurn, which has access
+        // to the sidecar client. Reaching this branch = a config bug.
+        return {
+          status: "error",
+          error:
+            "use_specialist must be handled by the specialist turn runner, not runTool.",
+        };
       default:
         return { status: "error", error: `unknown tool: ${name}` };
     }
@@ -381,4 +520,30 @@ export async function runTool(
       error: msg,
     };
   }
+}
+
+function asOptionalString(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const t = v.trim();
+  return t ? t : undefined;
+}
+
+function clampLimit(v: unknown, fallback: number, max: number): number {
+  const n = typeof v === "number" && Number.isFinite(v) ? Math.floor(v) : fallback;
+  if (n <= 0) return fallback;
+  return Math.min(n, max);
+}
+
+function formatMemoryList(mems: Memory[]): string {
+  if (mems.length === 0) return "(no memories)";
+  return mems
+    .map((m) => {
+      const label = m.kind ? `[${m.kind}]` : "[note]";
+      const body =
+        m.content.length > 240
+          ? m.content.slice(0, 240) + "…"
+          : m.content;
+      return `- ${label} ${m.name} — ${body.replace(/\s+/g, " ")}`;
+    })
+    .join("\n");
 }
