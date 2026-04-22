@@ -59,10 +59,17 @@ class PeftConvertError(Exception):
     pass
 
 
+def _peft_weights_path(adapter_dir: Path) -> Path | None:
+    for name in ("adapter_model.safetensors", "adapters.safetensors"):
+        p = adapter_dir / name
+        if p.exists():
+            return p
+    return None
+
+
 def is_peft_adapter(adapter_dir: Path) -> bool:
     cfg_path = adapter_dir / "adapter_config.json"
-    weights_path = adapter_dir / "adapter_model.safetensors"
-    if not cfg_path.exists() or not weights_path.exists():
+    if not cfg_path.exists() or _peft_weights_path(adapter_dir) is None:
         return False
     try:
         cfg = json.loads(cfg_path.read_text())
@@ -90,8 +97,8 @@ def convert_peft_adapter(
     base_model_id: str | None = None,
 ) -> dict:
     peft_cfg_path = src_dir / "adapter_config.json"
-    weights_path = src_dir / "adapter_model.safetensors"
-    if not peft_cfg_path.exists() or not weights_path.exists():
+    weights_path = _peft_weights_path(src_dir)
+    if not peft_cfg_path.exists() or weights_path is None:
         raise PeftConvertError(f"expected PEFT files under {src_dir}")
     peft_cfg = json.loads(peft_cfg_path.read_text())
     if peft_cfg.get("peft_type") != "LORA":

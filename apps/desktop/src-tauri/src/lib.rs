@@ -29,6 +29,40 @@ fn app_adapters_dir(app: AppHandle) -> Result<String, String> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
+#[derive(Serialize)]
+struct DownloadedAdapter {
+    slug: String,
+    path: String,
+}
+
+#[tauri::command]
+fn list_downloaded_adapters(app: AppHandle) -> Result<Vec<DownloadedAdapter>, String> {
+    let root = PathBuf::from(app_adapters_dir(app)?);
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(&root) else {
+        return Ok(out);
+    };
+    for entry in rd.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let has_weights = path.join("adapters.safetensors").exists()
+            || path.join("adapter_model.safetensors").exists();
+        if !has_weights {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            out.push(DownloadedAdapter {
+                slug: name.to_string(),
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 fn set_workspace(
     app: AppHandle,
@@ -216,6 +250,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             sidecar::sidecar_send,
             app_adapters_dir,
+            list_downloaded_adapters,
             download_adapter,
             system_memory_bytes,
             set_workspace,

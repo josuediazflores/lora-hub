@@ -142,8 +142,22 @@ app.get("/adapters/:slug", async (c) => {
 });
 
 // Streams a single artifact file (adapters.safetensors or adapter_config.json).
+// Keys prefixed with "hf://" redirect to the HuggingFace resolve URL so we can
+// serve adapters hosted on HF without copying them into R2.
 app.get("/r2/:key{.+}", async (c) => {
   const key = c.req.param("key");
+  if (key.startsWith("hf://")) {
+    const rest = key.slice("hf://".length);
+    const slash = rest.indexOf("/");
+    const nextSlash = rest.indexOf("/", slash + 1);
+    if (slash < 0 || nextSlash < 0) {
+      return c.json({ error: "bad_hf_key", key }, 400);
+    }
+    const repo = rest.slice(0, nextSlash);
+    const file = rest.slice(nextSlash + 1);
+    const url = `https://huggingface.co/${repo}/resolve/main/${file}`;
+    return Response.redirect(url, 302);
+  }
   const object = await c.env.ADAPTERS.get(key);
   if (!object) return c.json({ error: "object_missing", key }, 404);
   return new Response(object.body, {

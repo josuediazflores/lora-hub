@@ -25,6 +25,22 @@ import { FeaturedAdapters } from "./components/FeaturedAdapters";
 import { ActiveAdapterStrip } from "./components/ActiveAdapterStrip";
 import { WorkspaceFooter } from "./components/WorkspaceFooter";
 import { ToolCallBubble, type ToolCallMessage } from "./components/ToolCallBubble";
+import {
+  SpecialistStepBubble,
+  type SpecialistStepMessage,
+} from "./components/SpecialistStepBubble";
+import {
+  SpecialistPlanBubble,
+  type SpecialistPlanMessage,
+  type SpecialistPlanStep,
+} from "./components/SpecialistPlanBubble";
+import {
+  ABComparePane,
+  type ABComparisonMessage,
+  type ABPick,
+} from "./components/ABComparePane";
+import { AB_DELTAS, selectNextDelta, type ABDelta } from "./lib/ab-deltas";
+import type { ChatMode } from "./components/ModeChip";
 import { TurnRow, SwapMarker, GutterBtn } from "./components/TurnRow";
 import { ThoughtDisclosure } from "./components/ThoughtDisclosure";
 import { parseThinking } from "./lib/thinking";
@@ -454,7 +470,21 @@ type MemoryChipMessage = {
   detail?: string;
 };
 
-type AnyMessage = Message | ComparisonMessage | ToolCallMessage | MemoryChipMessage;
+type AnyMessage =
+  | Message
+  | ComparisonMessage
+  | ToolCallMessage
+  | MemoryChipMessage
+  | SpecialistStepMessage
+  | SpecialistPlanMessage
+  | ABComparisonMessage;
+
+type AdapterEntryMerged = {
+  name: string;
+  path: string;
+  base_sha: string | null;
+  downloaded_only: boolean;
+};
 
 type Status = {
   base_model_id: string | null;
@@ -534,6 +564,39 @@ function cleanOnLoad(m: AnyMessage): AnyMessage {
     const status = m.status === "pending" ? "denied" : m.status;
     return { ...m, output, status };
   }
+  if (m.role === "specialist_step") {
+    const MAX = 2000;
+    const output =
+      m.output && m.output.length > MAX
+        ? m.output.slice(0, MAX) + "\n…truncated for persistence…"
+        : m.output;
+    if (m.status === "pending") {
+      return { ...m, output, status: "error", error: m.error ?? "session ended" };
+    }
+    return { ...m, output };
+  }
+  if (m.role === "specialist_plan") {
+    // Plan messages don't accumulate stream state — they're fully formed
+    // by the time the first planner step finishes. Safe to persist as-is.
+    return m;
+  }
+  if (m.role === "ab_comparison") {
+    // Trim both lanes on persist. A pending A/B turn from a prior session
+    // is dead — if we never streamed a result in the old process we can't
+    // resurrect it, so just mark the turn as dismissed.
+    const MAX = 2000;
+    const trim = (s: string) =>
+      s.length > MAX ? s.slice(0, MAX) + "\n…truncated for persistence…" : s;
+    const pick: ABPick | null =
+      m.pending !== null && !m.pick ? "dismissed" : m.pick;
+    return {
+      ...m,
+      baselineText: trim(m.baselineText),
+      variationText: trim(m.variationText),
+      pending: null,
+      pick,
+    };
+  }
   // Drop image `data_url`s from stored attachments — base64'd images are
   // the real bloat risk for localStorage. The card still renders from
   // name/kind/size and the extracted text survives for follow-up turns.
@@ -552,9 +615,10 @@ function buildHistory(
   msgs: AnyMessage[],
   systemPrompt: string = "",
   memories: Memory[] = [],
+  learnedRules: string[] = [],
 ): sidecar.ChatMessage[] {
   const out: sidecar.ChatMessage[] = [];
-  const sys = buildSystemMessage(systemPrompt, memories);
+  const sys = buildSystemMessage(systemPrompt, memories, learnedRules);
   if (sys) out.push({ role: "system", content: sys });
   for (const m of msgs) {
     if (m.role === "comparison") {
@@ -580,6 +644,45 @@ function buildHistory(
       out.push({
         role: "user",
         content: `[tool result: ${m.name}${
+          m.status !== "success" ? " " + m.status : ""
+        }]\n${resultText}`,
+      });
+    } else if (m.role === "ab_comparison") {
+      // The user prompt for this turn lives on a separate `user`-role
+      // Message (runABTurn pushes it first), so don't duplicate. Emit
+      // only the picked lane's output as the assistant turn. Default to
+      // baseline if the user never clicked (silence ≠ accept).
+      const pickedText =
+        m.pick === "variation" ? m.variationText : m.baselineText;
+      const assistantContent = pickedText.trim();
+      if (assistantContent)
+        out.push({ role: "assistant", content: assistantContent });
+    } else if (m.role === "specialist_plan") {
+      // UI-only record; the planner's own output already contained the
+      // <plan>…</plan> block inline, so don't re-add it to history.
+      continue;
+    } else if (m.role === "specialist_step") {
+      const slugLabel = m.slug ?? "base";
+      out.push({
+        role: "assistant",
+        content: `<tool_call>${JSON.stringify({
+          name: "use_specialist",
+          args: { slug: m.slug, instruction: m.instruction },
+        })}</tool_call>`,
+      });
+      // Specialist outputs can be verbose. Tail-trim on follow-up turns to
+      // keep the planner's context manageable — the user still sees the
+      // full output in the transcript.
+      const TAIL = 3200;
+      const raw =
+        m.status === "success"
+          ? m.output
+          : m.error ?? m.output ?? `[${m.status}]`;
+      const resultText =
+        raw.length > TAIL ? raw.slice(0, TAIL) + "\n…truncated…" : raw;
+      out.push({
+        role: "user",
+        content: `[tool result: use_specialist ${slugLabel}${
           m.status !== "success" ? " " + m.status : ""
         }]\n${resultText}`,
       });
@@ -628,6 +731,21 @@ function estimateMessageTokens(messages: AnyMessage[]): number {
     } else if (m.role === "memory_chip") {
       // Not included in prompt — see buildHistory.
       continue;
+    } else if (m.role === "specialist_step") {
+      sum +=
+        estimateTokens(m.instruction) +
+        estimateTokens(m.output) +
+        estimateTokens(m.slug ?? "") +
+        16;
+    } else if (m.role === "specialist_plan") {
+      // Not sent to the model — see buildHistory.
+      continue;
+    } else if (m.role === "ab_comparison") {
+      // Only the picked (or baseline) lane is in the prompt — don't
+      // double-count the losing lane.
+      const picked =
+        m.pick === "variation" ? m.variationText : m.baselineText;
+      sum += estimateTokens(picked) + 8;
     } else {
       sum += estimateTokens(m.text) + 4; // + role overhead
       if (m.role === "user" && m.attachments) {
@@ -641,6 +759,27 @@ function estimateMessageTokens(messages: AnyMessage[]): number {
     }
   }
   return sum;
+}
+
+/** Planner adapter slug lookup for Specialist mode. Matches the plan's
+ * exact slugs (`opus-reasoning-e2b` / `-e4b`) first, then falls back to any
+ * installed adapter whose name contains `opus-reasoning` and the base's
+ * size tag. Returns null when no suitable planner is installed. */
+function findPlannerAdapter(
+  adapters: { name: string }[],
+  baseParams: string | null,
+): string | null {
+  const size = (baseParams ?? "").toLowerCase();
+  const exact =
+    size === "e2b" ? "opus-reasoning-e2b" : size === "e4b" ? "opus-reasoning-e4b" : null;
+  if (exact && adapters.some((a) => a.name === exact)) return exact;
+  for (const a of adapters) {
+    const n = a.name.toLowerCase();
+    if (!n.includes("opus-reasoning")) continue;
+    if (size && !n.includes(size)) continue;
+    return a.name;
+  }
+  return null;
 }
 
 /** Context window per base family. Numbers are conservative — we'd rather
@@ -672,12 +811,32 @@ function currentDateContext(): string {
   return `Today is ${iso} (${weekday}). The user's local timezone is ${tz}. Use this as ground truth for any time-sensitive question — "tomorrow", "next week", "this year" — and when deciding whether to run a fresh web_search.`;
 }
 
-function buildSystemMessage(systemPrompt: string, memories: Memory[]): string {
+function buildSystemMessage(
+  systemPrompt: string,
+  memories: Memory[],
+  learnedRules: string[] = [],
+): string {
   const prompt = systemPrompt.trim();
   const dateLine = currentDateContext();
+  // Learned rules are rendered as a small bulleted block the model can
+  // scan. We dedupe on the fly in case the user manually re-added a rule
+  // that a past A/B already picked.
+  const cleanedRules = Array.from(
+    new Set(learnedRules.map((r) => r.trim()).filter((r) => r.length > 0)),
+  );
+  const learnedBlock =
+    cleanedRules.length > 0
+      ? [
+          "Style preferences (learned from your past A/B picks — treat each as a soft rule):",
+          ...cleanedRules.map((r) => `- ${r}`),
+        ].join("\n")
+      : "";
 
   if (!memories.length) {
-    return prompt ? `${prompt}\n\n${dateLine}` : dateLine;
+    const parts = [prompt, dateLine, learnedBlock].filter(
+      (s) => s.length > 0,
+    );
+    return parts.join("\n\n");
   }
 
   // Greedy fit: include memories oldest-updated-first until the block would
@@ -685,7 +844,11 @@ function buildSystemMessage(systemPrompt: string, memories: Memory[]): string {
   // rationale is that a fresh, un-curated memory is more likely to be noise
   // than something you've had pinned for weeks.
   const lines = ["The user has recorded the following durable notes about themselves. Use them to personalize responses; don't repeat them back verbatim unless asked."];
-  const baseBytes = (prompt ? prompt.length + 2 : 0) + dateLine.length + 2;
+  const baseBytes =
+    (prompt ? prompt.length + 2 : 0) +
+    dateLine.length +
+    2 +
+    (learnedBlock.length ? learnedBlock.length + 2 : 0);
   let bytes = baseBytes + lines[0].length;
   const sortedOldestFirst = [...memories].sort((a, b) => a.updated_at - b.updated_at);
   for (const m of sortedOldestFirst) {
@@ -696,7 +859,9 @@ function buildSystemMessage(systemPrompt: string, memories: Memory[]): string {
     bytes += line.length + 1;
   }
   const memoryBlock = lines.join("\n");
-  const parts = [prompt, dateLine, memoryBlock].filter((s) => s.length > 0);
+  const parts = [prompt, dateLine, learnedBlock, memoryBlock].filter(
+    (s) => s.length > 0,
+  );
   return parts.join("\n\n");
 }
 
@@ -720,6 +885,10 @@ function App() {
   const [dragOver, setDragOver] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settings, setSettings] = useState<Settings>(loadSettings);
+  // Ephemeral A/B tuning bookkeeping — lost on reload, which is fine
+  // because the feature is opportunistic (no harm in missing a turn).
+  const abTurnCountRef = useRef(0);
+  const abRecentDeltasRef = useRef<string[]>([]);
   const [inflightGenId, setInflightGenId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
@@ -758,6 +927,7 @@ function App() {
   const [pendingBase, setPendingBase] = useState<StoreBase | null>(null);
   const [compareMode, setCompareMode] = useState<boolean>(false);
   const [computerUseMode, setComputerUseMode] = useState<boolean>(false);
+  const [specialistMode, setSpecialistMode] = useState<boolean>(false);
   const [permissionPreset, setPermissionPresetState] = useState<Preset>("read_only");
   const [workspace, setWorkspaceState] = useState<Workspace | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -778,6 +948,7 @@ function App() {
     const systemBlock = buildSystemMessage(
       settings.systemPrompt,
       settings.useMemoryInContext ? memories : [],
+      settings.learnedRules,
     );
     const used =
       estimateTokens(systemBlock) +
@@ -1028,18 +1199,46 @@ function App() {
     if (!status?.active_adapter && compareMode) setCompareMode(false);
   }, [status?.active_adapter, compareMode]);
 
-  function toggleComputerUse() {
-    setComputerUseMode((v) => {
-      const next = !v;
-      if (next) setCompareMode(false); // mutually exclusive
-      return next;
-    });
+  const chatMode: ChatMode = computerUseMode
+    ? "cu"
+    : specialistMode
+      ? "specialist"
+      : "normal";
+
+  /** Mutex-enforced mode setter used by the composer chip + palette. */
+  function setChatMode(m: ChatMode) {
+    if (m === "cu") {
+      setCompareMode(false);
+      setSpecialistMode(false);
+      setComputerUseMode(true);
+    } else if (m === "specialist") {
+      setCompareMode(false);
+      setComputerUseMode(false);
+      setSpecialistMode(true);
+      // Auto-equip the planner adapter when entering specialist mode, so
+      // subsequent generations run through it without the user hunting
+      // through the adapter picker. A missing planner is surfaced in the
+      // composer placeholder + in runSpecialistTurn's pre-flight check.
+      const planner = findPlannerAdapter(
+        status?.adapters ?? [],
+        activeBase?.parameters ?? null,
+      );
+      if (planner) {
+        setStatus((s) => (s ? { ...s, active_adapter: planner } : s));
+      }
+    } else {
+      setComputerUseMode(false);
+      setSpecialistMode(false);
+    }
   }
 
   function toggleCompareMutex() {
     setCompareMode((v) => {
       const next = !v;
-      if (next) setComputerUseMode(false); // mutually exclusive
+      if (next) {
+        setComputerUseMode(false); // mutually exclusive
+        setSpecialistMode(false);
+      }
       return next;
     });
   }
@@ -1241,9 +1440,9 @@ function App() {
     adapter: StoreAdapter,
     afterInstallPrompt?: string,
   ) {
-    if (!baseLoaded) {
+    if (!baseLoaded && afterInstallPrompt) {
       setView("chat");
-      pushSystem("Load the base model first.");
+      pushSystem("Load the base model first to try this adapter.");
       return;
     }
     if (status?.adapters.some((a) => a.name === adapter.slug)) {
@@ -1314,6 +1513,24 @@ function App() {
         files,
         onEvent: channel,
       })) as string;
+
+      if (!baseLoaded) {
+        void store.markInstalled(adapter.slug);
+        patchActiveChat((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.id === progressId
+              ? {
+                  ...m,
+                  text: `Downloaded "${adapter.name}" to disk. Load the base model to activate.`,
+                  progress: null,
+                }
+              : m,
+          ),
+        }));
+        setBusy(false);
+        return;
+      }
 
       const ld = await sidecar.loadAdapter(adapter.slug, installedDir);
       if (ld.type === "error") {
@@ -1387,6 +1604,97 @@ function App() {
     }
   }
 
+  /** Ensure `slug` is attached to the sidecar. Auto-attaches from disk if
+   * downloaded but not yet loaded. Returns `null` on success, otherwise an
+   * error string. */
+  async function ensureAdapterAttached(slug: string): Promise<string | null> {
+    if ((status?.adapters ?? []).some((a) => a.name === slug)) return null;
+    const diskRow = downloadedAdapters.find((d) => d.slug === slug);
+    if (!diskRow) {
+      const known = [
+        ...(status?.adapters ?? []).map((a) => a.name),
+        ...downloadedAdapters.map((d) => d.slug),
+      ]
+        .slice(0, 12)
+        .join(", ");
+      return (
+        `unknown adapter "${slug}" — not attached or downloaded.` +
+        (known ? ` Available: ${known}.` : "")
+      );
+    }
+    try {
+      const ld = await sidecar.loadAdapter(diskRow.slug, diskRow.path);
+      if (ld.type === "error") return `failed to attach "${slug}": ${ld.error.message}`;
+      await refreshStatus();
+      return null;
+    } catch (e) {
+      return `failed to attach "${slug}": ${String(e)}`;
+    }
+  }
+
+  /** Tool-handler for compare_outputs. Runs the same instruction through
+   * two lanes (slug_a, slug_b) and returns both outputs side-by-side as a
+   * single string result that fits into the existing tool_call UI. */
+  async function runCompareOutputs(
+    args: Record<string, unknown>,
+  ): Promise<{ status: "success" | "error"; output?: string; error?: string }> {
+    const instruction = String(args.instruction ?? "").trim();
+    if (!instruction) {
+      return { status: "error", error: "compare_outputs requires `instruction`" };
+    }
+    const rawA = args.slug_a;
+    const rawB = args.slug_b;
+    const slugA =
+      typeof rawA === "string" && rawA.trim() ? rawA.trim() : null;
+    const slugB =
+      typeof rawB === "string" && rawB.trim() ? rawB.trim() : null;
+    const maxTokens =
+      typeof args.max_tokens === "number" && Number.isFinite(args.max_tokens)
+        ? Math.max(32, Math.floor(args.max_tokens))
+        : settings.maxTokens;
+
+    const runLane = async (
+      slug: string | null,
+    ): Promise<{ ok: true; text: string } | { ok: false; error: string }> => {
+      if (slug) {
+        const attachErr = await ensureAdapterAttached(slug);
+        if (attachErr) return { ok: false, error: attachErr };
+      }
+      let accum = "";
+      const handle = sidecar.generate(instruction, {
+        adapter: slug ?? undefined,
+        baseOnly: slug === null,
+        messages: [],
+        temperature: settings.temperature,
+        topP: settings.topP,
+        maxTokens,
+        onToken: (t) => {
+          accum += t;
+        },
+      });
+      const res = await handle.result;
+      if (res.type === "error") return { ok: false, error: res.error.message };
+      const r = res.result as { aborted?: boolean };
+      if (r.aborted) return { ok: false, error: "aborted" };
+      return { ok: true, text: accum };
+    };
+
+    const a = await runLane(slugA);
+    const b = await runLane(slugB);
+    const labelA = slugA ?? "base";
+    const labelB = slugB ?? "base";
+    if (!a.ok && !b.ok) {
+      return {
+        status: "error",
+        error: `both lanes failed — A (${labelA}): ${a.error}; B (${labelB}): ${b.error}`,
+      };
+    }
+    const rendered =
+      `[A · ${labelA}]\n${a.ok ? a.text : `ERROR: ${a.error}`}\n\n` +
+      `[B · ${labelB}]\n${b.ok ? b.text : `ERROR: ${b.error}`}`;
+    return { status: "success", output: rendered };
+  }
+
   async function handleCreateTestAdapters() {
     if (!baseLoaded) {
       pushSystem("Load the base model before creating test adapters.");
@@ -1437,8 +1745,34 @@ function App() {
     if (computerUseMode) {
       return runAgentTurn(typed, currentAttachments);
     }
+    if (specialistMode) {
+      return runSpecialistTurn(typed, currentAttachments);
+    }
+    // Opportunistic A/B tuning: fire a 2-lane compare every Nth turn
+    // when running on the plain base model. Gated hard so it never
+    // surprises users who haven't opted in.
+    if (shouldFireAB(typed)) {
+      return runABTurn(typed, currentAttachments);
+    }
+    abTurnCountRef.current += 1;
     setInput("");
     await runNormalTurn(typed, status?.active_adapter ?? null, currentAttachments);
+  }
+
+  /** Gate for opportunistic A/B firing. Encodes every condition from the
+   * plan so the decision site in `handleSend` stays a single boolean. */
+  function shouldFireAB(typed: string): boolean {
+    if (!settings.abTuning.enabled) return false;
+    if (status?.active_adapter) return false;                 // base only
+    if (computerUseMode || specialistMode || compareMode) return false;
+    if (activeChat.messages.length === 0) return false;       // not first turn
+    if (typed.trim().length < 12) return false;               // non-trivial
+    const freq = Math.max(2, settings.abTuning.frequency);
+    if (abTurnCountRef.current < freq) return false;
+    // Cooldown: if any of the last 3 messages is already an A/B turn, skip.
+    const tail = activeChat.messages.slice(-3);
+    if (tail.some((m) => m.role === "ab_comparison")) return false;
+    return true;
   }
 
   async function runNormalTurn(
@@ -1470,11 +1804,16 @@ function App() {
     // (renders as a chip) and/or the web tools fetch_page + web_search
     // (render as standard tool bubbles). Filesystem and shell tools remain
     // Computer-Use-only because they need a workspace pick.
+    const memoryReadEnabled = settings.memoryInNormalChat;
     const memoryToolEnabled =
       settings.memoryInNormalChat && settings.memoryWritePolicy !== "off";
     const webToolsEnabled = settings.webToolsInNormalChat;
     const allowedToolNames = new Set<string>();
     if (memoryToolEnabled) allowedToolNames.add("save_memory");
+    if (memoryReadEnabled) {
+      allowedToolNames.add("recall_memory");
+      allowedToolNames.add("list_memories");
+    }
     if (webToolsEnabled) {
       allowedToolNames.add("fetch_page");
       allowedToolNames.add("web_search");
@@ -1488,6 +1827,7 @@ function App() {
       activeChat.messages,
       settings.systemPrompt,
       settings.useMemoryInContext ? memories : [],
+      settings.learnedRules,
     );
     let currentPrompt = promptForModel;
     const MAX_STEPS = allowedToolNames.size > 0 ? 4 : 1;
@@ -1653,7 +1993,7 @@ function App() {
       messages: [...c.messages, userMsg],
     }));
 
-    let history: sidecar.ChatMessage[] = buildHistory(activeChat.messages, settings.systemPrompt, settings.useMemoryInContext ? memories : []);
+    let history: sidecar.ChatMessage[] = buildHistory(activeChat.messages, settings.systemPrompt, settings.useMemoryInContext ? memories : [], settings.learnedRules);
     let currentPrompt = promptForModel;
     const adapter = status?.active_adapter ?? null;
     const MAX_STEPS = 8;
@@ -1770,6 +2110,8 @@ function App() {
         let result: Awaited<ReturnType<typeof runTool>>;
         if (call.name === "save_memory") {
           result = await handleMemoryToolCall(call.args, activeChatId);
+        } else if (call.name === "compare_outputs") {
+          result = await runCompareOutputs(call.args);
         } else {
           result = await runTool(call.name, call.args);
         }
@@ -1826,6 +2168,580 @@ function App() {
     }
   }
 
+  async function runSpecialistTurn(
+    userText: string,
+    attachments: Attachment[] = [],
+  ) {
+    let plannerSlug = findPlannerAdapter(
+      status?.adapters ?? [],
+      activeBase?.parameters ?? null,
+    );
+    if (!plannerSlug) {
+      const downloadedPlanner = findPlannerAdapter(
+        downloadedAdapters.map((d) => ({ name: d.slug })),
+        activeBase?.parameters ?? null,
+      );
+      const diskRow = downloadedPlanner
+        ? downloadedAdapters.find((d) => d.slug === downloadedPlanner)
+        : null;
+      if (diskRow && baseLoaded) {
+        pushSystem(`Attaching planner "${diskRow.slug}"…`);
+        const ld = await sidecar.loadAdapter(diskRow.slug, diskRow.path);
+        if (ld.type === "error") {
+          pushSystem(`Failed to attach planner: ${ld.error.message}`);
+          return;
+        }
+        await refreshStatus();
+        setStatus((s) => (s ? { ...s, active_adapter: diskRow.slug } : s));
+        plannerSlug = diskRow.slug;
+      } else {
+        pushSystem(
+          "Specialist mode needs an Opus-reasoning planner adapter installed for this base. Install `opus-reasoning-e2b` or `opus-reasoning-e4b` from the Store.",
+        );
+        return;
+      }
+    }
+
+    setInput("");
+    setBusy(true);
+
+    const promptForModel =
+      userText + formatAttachmentsForPrompt(attachments);
+
+    const userMsg: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text: userText,
+      attachments: attachments.length ? attachments : undefined,
+    };
+    patchActiveChat((c) => ({
+      ...c,
+      title: c.title || (userText || attachments[0]?.name || "").slice(0, 48),
+      messages: [...c.messages, userMsg],
+    }));
+
+    // Build the specialist catalog. Merges sidecar-attached adapters with
+    // on-disk downloaded adapters so the planner can decide whether any
+    // available LoRA fits a step — not just ones already attached. Each
+    // adapter's description/tags come from the storefront metadata so the
+    // planner has something meaningful to route on.
+    const attachedNames = new Set(
+      (status?.adapters ?? []).map((a) => a.name),
+    );
+    const availableSlugs = new Set<string>([
+      ...attachedNames,
+      ...downloadedAdapters.map((d) => d.slug),
+    ]);
+    availableSlugs.delete(plannerSlug);
+
+    const metadataBySlug = new Map<string, StoreAdapter>();
+    try {
+      const storeList = await store.fetchAdapters({ limit: 200 });
+      for (const a of storeList) metadataBySlug.set(a.slug, a);
+    } catch {
+      // Storefront unreachable → fall back to slug-only catalog below.
+    }
+
+    const catalogRows = Array.from(availableSlugs).map((slug) => {
+      const meta = metadataBySlug.get(slug);
+      const human = meta?.name ?? slug;
+      const desc = (meta?.description ?? "(no description)")
+        .replace(/\s+/g, " ")
+        .slice(0, 180);
+      const tags = (meta?.tags ?? []).slice(0, 4).join(",") || "—";
+      const availability = attachedNames.has(slug)
+        ? "attached"
+        : "on-disk (auto-attach)";
+      return `| ${slug} | ${human} | ${desc} | ${tags} | ${availability} |`;
+    });
+    const catalogTable = catalogRows.length > 0
+      ? `| slug | human name | description | tags | availability |\n` +
+        `|---|---|---|---|---|\n` +
+        catalogRows.join("\n")
+      : "No additional specialists available — every step will run on the plain base model.";
+
+    const plannerPreamble =
+      `You are the PLANNER adapter (${plannerSlug}). Your job is to design a ` +
+      `fully-fleshed-out plan, THEN execute it step-by-step by delegating each step ` +
+      `through the use_specialist tool.\n\n` +
+      `### Adapters available for this base\n\n` +
+      catalogTable +
+      `\n\n` +
+      `### How to pick an adapter for a step\n` +
+      `- Use \`slug: null\` when the plain base model is sufficient (general knowledge, ` +
+      `fluent writing, simple transformations).\n` +
+      `- Use a specific \`slug\` only when that adapter's description/tags clearly match ` +
+      `the step's intent — don't force-fit a LoRA.\n` +
+      `- "on-disk (auto-attach)" adapters are lazily loaded on first use; prefer them ` +
+      `when they fit, but there's no cost penalty if you stick to the base.\n\n` +
+      `### Output contract\n` +
+      `Your very first output this turn must be a single fenced plan block:\n\n` +
+      `<plan>\n` +
+      `{"title": "one-line summary of the overall goal",\n` +
+      ` "steps": [\n` +
+      `   {"slug": "some-adapter" | null, "purpose": "self-contained description of this step"}\n` +
+      ` ]}\n` +
+      `</plan>\n\n` +
+      `After the plan block, execute each step in order by emitting one use_specialist ` +
+      `tool call per step, matching the \`slug\` and filling \`instruction\` with a ` +
+      `self-contained prompt (the specialist sees no prior conversation). The specialist ` +
+      `itself has access to tools (read_file, write_file, edit_file, list_dir, glob, grep, ` +
+      `run_command, http_fetch, fetch_page, web_search) — if a step needs filesystem, shell, ` +
+      `or web access, say so in \`instruction\` and the specialist will call the right tool. ` +
+      `Between calls, keep your own reasoning inside <think>…</think>. When all steps are ` +
+      `done, emit a final consolidated answer to the user in plain text.`;
+
+    const combinedSystemPrompt = settings.systemPrompt
+      ? `${settings.systemPrompt}\n\n${plannerPreamble}`
+      : plannerPreamble;
+
+    let history: sidecar.ChatMessage[] = buildHistory(
+      activeChat.messages,
+      combinedSystemPrompt,
+      settings.useMemoryInContext ? memories : [],
+      settings.learnedRules,
+    );
+    let currentPrompt = promptForModel;
+    const specialistTools = TOOL_DEFS.filter((t) => t.name === "use_specialist");
+    const MAX_STEPS = 10;
+    let stopped: "ok" | "error" | "aborted" | "maxsteps" = "ok";
+
+    // Plan bookkeeping. The planner is asked to emit a <plan>…</plan> JSON
+    // block as its very first output. We parse it the moment we see the
+    // closing tag, insert a SpecialistPlanMessage into the transcript, and
+    // then tick step statuses as use_specialist calls land.
+    let planMsgId: string | null = null;
+    let planSteps: SpecialistPlanStep[] = [];
+    let planParsed = false;
+    const patchPlanMsg = (
+      mutator: (steps: SpecialistPlanStep[]) => SpecialistPlanStep[],
+    ) => {
+      if (!planMsgId) return;
+      patchActiveChat((c) => ({
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === planMsgId && m.role === "specialist_plan"
+            ? { ...m, steps: mutator(m.steps) }
+            : m,
+        ),
+      }));
+      planSteps = mutator(planSteps);
+    };
+
+    try {
+      for (let step = 0; step < MAX_STEPS; step++) {
+        const assistantId = crypto.randomUUID();
+        patchActiveChat((c) => ({
+          ...c,
+          messages: [
+            ...c.messages,
+            {
+              id: assistantId,
+              role: "assistant",
+              text: "",
+              adapter: plannerSlug,
+              pending: true,
+            },
+          ],
+        }));
+
+        let assistantAccum = "";
+        let toolCall: sidecar.SidecarToolCall | null = null;
+        let toolProtoErr: string | null = null;
+
+        const handle = sidecar.generate(currentPrompt, {
+          adapter: plannerSlug,
+          messages: history,
+          temperature: settings.temperature,
+          topP: settings.topP,
+          maxTokens: settings.maxTokens,
+          tools: specialistTools,
+          onToken: (text) => {
+            assistantAccum += text;
+            patchActiveChat((c) => ({
+              ...c,
+              messages: c.messages.map((m) =>
+                m.id === assistantId && m.role === "assistant"
+                  ? { ...m, text: m.text + text }
+                  : m,
+              ),
+            }));
+            if (!planParsed && step === 0) {
+              const closeIdx = assistantAccum.indexOf("</plan>");
+              if (closeIdx >= 0) {
+                planParsed = true;
+                const openIdx = assistantAccum.indexOf("<plan>");
+                const body = openIdx >= 0
+                  ? assistantAccum.slice(openIdx + "<plan>".length, closeIdx).trim()
+                  : "";
+                try {
+                  const parsed = JSON.parse(body) as {
+                    title?: unknown;
+                    steps?: unknown;
+                  };
+                  const title =
+                    typeof parsed.title === "string"
+                      ? parsed.title
+                      : "specialist plan";
+                  const rawSteps = Array.isArray(parsed.steps) ? parsed.steps : [];
+                  const steps: SpecialistPlanStep[] = rawSteps
+                    .map((s: unknown): SpecialistPlanStep | null => {
+                      if (!s || typeof s !== "object") return null;
+                      const rec = s as Record<string, unknown>;
+                      const slugRaw = rec.slug;
+                      const purposeRaw = rec.purpose;
+                      if (typeof purposeRaw !== "string" || !purposeRaw.trim()) {
+                        return null;
+                      }
+                      const slug =
+                        typeof slugRaw === "string" && slugRaw.trim()
+                          ? slugRaw.trim()
+                          : null;
+                      return {
+                        slug,
+                        purpose: purposeRaw.trim(),
+                        status: "pending",
+                      };
+                    })
+                    .filter((s): s is SpecialistPlanStep => s !== null);
+                  if (steps.length > 0) {
+                    const id = crypto.randomUUID();
+                    planMsgId = id;
+                    planSteps = steps;
+                    const planMsg: SpecialistPlanMessage = {
+                      id,
+                      role: "specialist_plan",
+                      title,
+                      steps,
+                    };
+                    patchActiveChat((c) => {
+                      // Insert the plan right above the current assistant bubble.
+                      const idx = c.messages.findIndex(
+                        (m) => m.id === assistantId,
+                      );
+                      if (idx < 0) {
+                        return { ...c, messages: [...c.messages, planMsg] };
+                      }
+                      return {
+                        ...c,
+                        messages: [
+                          ...c.messages.slice(0, idx),
+                          planMsg,
+                          ...c.messages.slice(idx),
+                        ],
+                      };
+                    });
+                  }
+                } catch {
+                  pushSystem(
+                    "Couldn't parse the planner's <plan> block as JSON — continuing without a plan overlay.",
+                  );
+                }
+              }
+            }
+          },
+          onToolCall: (call) => {
+            toolCall = call;
+          },
+          onToolError: (err) => {
+            toolProtoErr = err.error;
+          },
+        });
+        setInflightGenId(handle.id);
+        const res = await handle.result;
+        setInflightGenId(null);
+
+        patchActiveChat((c) => ({
+          ...c,
+          messages: c.messages.map((m) => {
+            if (m.id !== assistantId || m.role !== "assistant") return m;
+            if (res.type === "error") {
+              return {
+                ...m,
+                text: m.text + `\n[error: ${res.error.message}]`,
+                pending: false,
+              };
+            }
+            const r = res.result as { aborted?: boolean };
+            return {
+              ...m,
+              text: m.text + (r.aborted ? " ⏹" : ""),
+              pending: false,
+            };
+          }),
+        }));
+
+        if (res.type === "error") {
+          stopped = "error";
+          break;
+        }
+        const r = res.result as { aborted?: boolean };
+        if (r.aborted) {
+          stopped = "aborted";
+          break;
+        }
+
+        if (toolProtoErr && !toolCall) {
+          history.push({ role: "assistant", content: assistantAccum });
+          currentPrompt = `[tool_error] ${toolProtoErr}\nReformat your tool call using the exact <tool_call>{...}</tool_call> format on a single line, or finish with a plain-text answer.`;
+          continue;
+        }
+
+        if (!toolCall) {
+          break;
+        }
+
+        const call: sidecar.SidecarToolCall = toolCall;
+        if (call.name !== "use_specialist") {
+          pushSystem(
+            `Planner emitted unsupported tool "${call.name}" — only use_specialist is available in this mode.`,
+          );
+          stopped = "error";
+          break;
+        }
+
+        const rawSlug = call.args.slug;
+        const slug =
+          typeof rawSlug === "string" && rawSlug.trim()
+            ? rawSlug.trim()
+            : null;
+        const instruction = String(call.args.instruction ?? "").trim();
+
+        const stepId = crypto.randomUUID();
+        const stepMsg: SpecialistStepMessage = {
+          id: stepId,
+          role: "specialist_step",
+          slug,
+          instruction,
+          output: "",
+          status: "pending",
+        };
+        patchActiveChat((c) => ({
+          ...c,
+          messages: [...c.messages, stepMsg],
+        }));
+
+        // Feed the planner's tool call into history for the next iteration
+        // regardless of whether the step itself succeeds.
+        const assistantContent =
+          assistantAccum +
+          `\n<tool_call>${JSON.stringify({
+            name: call.name,
+            args: call.args,
+          })}</tool_call>`;
+        history = [
+          ...history,
+          { role: "assistant", content: assistantContent },
+        ];
+
+        const failStep = (errText: string) => {
+          patchActiveChat((c) => ({
+            ...c,
+            messages: c.messages.map((m) =>
+              m.id === stepId && m.role === "specialist_step"
+                ? { ...m, status: "error", error: errText }
+                : m,
+            ),
+          }));
+          currentPrompt = `[tool result: use_specialist ${slug ?? "base"} error]\n${errText}`;
+        };
+
+        if (!instruction) {
+          failStep("use_specialist called with empty instruction");
+          continue;
+        }
+        if (slug) {
+          const attached = (status?.adapters ?? []).some((a) => a.name === slug);
+          if (!attached) {
+            const diskRow = downloadedAdapters.find((d) => d.slug === slug);
+            if (!diskRow) {
+              const known = [
+                ...(status?.adapters ?? []).map((a) => a.name),
+                ...downloadedAdapters.map((d) => d.slug),
+              ]
+                .filter((n) => n !== plannerSlug)
+                .slice(0, 12)
+                .join(", ");
+              failStep(
+                `unknown specialist slug "${slug}" — not installed on this base.` +
+                  (known ? ` Available: ${known}.` : ""),
+              );
+              continue;
+            }
+            try {
+              const ld = await sidecar.loadAdapter(diskRow.slug, diskRow.path);
+              if (ld.type === "error") {
+                failStep(`failed to attach "${slug}": ${ld.error.message}`);
+                continue;
+              }
+              await refreshStatus();
+            } catch (e) {
+              failStep(`failed to attach "${slug}": ${String(e)}`);
+              continue;
+            }
+          }
+        }
+
+        // Flip the next matching plan step to active.
+        if (planMsgId && planSteps.length > 0) {
+          patchPlanMsg((steps) => {
+            const idx = steps.findIndex(
+              (s) => s.status === "pending" && s.slug === slug,
+            );
+            if (idx < 0) return steps;
+            const next = steps.slice();
+            next[idx] = { ...next[idx], status: "active" };
+            return next;
+          });
+        }
+
+        // Specialists get a filtered tool set so they can actually act on
+        // their step (grep, read, run commands, fetch pages). `use_specialist`
+        // is stripped to prevent recursion; `save_memory` is stripped because
+        // memory writes belong to the top-level chat, not isolated sub-calls.
+        const innerTools = TOOL_DEFS.filter(
+          (t) => t.name !== "use_specialist" && t.name !== "save_memory",
+        );
+        const MAX_INNER_STEPS = 4;
+        let specOutputAccum = "";
+        let innerPrompt = instruction;
+        let innerHistory: sidecar.ChatMessage[] = [];
+        let specError: string | null = null;
+        const appendToOutput = (chunk: string) => {
+          specOutputAccum += chunk;
+          patchActiveChat((c) => ({
+            ...c,
+            messages: c.messages.map((m) =>
+              m.id === stepId && m.role === "specialist_step"
+                ? { ...m, output: m.output + chunk }
+                : m,
+            ),
+          }));
+        };
+
+        for (let inner = 0; inner < MAX_INNER_STEPS; inner++) {
+          let innerAccum = "";
+          let innerToolCall: sidecar.SidecarToolCall | null = null;
+
+          const specHandle = sidecar.generate(innerPrompt, {
+            adapter: slug ?? undefined,
+            baseOnly: slug === null,
+            messages: innerHistory,
+            temperature: settings.temperature,
+            topP: settings.topP,
+            maxTokens: settings.maxTokens,
+            tools: innerTools,
+            onToken: (text) => {
+              innerAccum += text;
+              appendToOutput(text);
+            },
+            onToolCall: (call) => {
+              innerToolCall = call;
+            },
+          });
+          setInflightGenId(specHandle.id);
+          const specRes = await specHandle.result;
+          setInflightGenId(null);
+
+          if (specRes.type === "error") {
+            specError = specRes.error.message;
+            break;
+          }
+          const rSpec = specRes.result as { aborted?: boolean };
+          if (rSpec.aborted) {
+            specError = "aborted";
+            break;
+          }
+
+          if (!innerToolCall) {
+            break;
+          }
+
+          const ic: sidecar.SidecarToolCall = innerToolCall;
+          const toolRes =
+            ic.name === "compare_outputs"
+              ? await runCompareOutputs(ic.args)
+              : await runTool(ic.name, ic.args);
+          const argsPreview = JSON.stringify(ic.args).slice(0, 220);
+          const bodyPreview = (
+            toolRes.status === "success"
+              ? toolRes.output ?? ""
+              : toolRes.error ?? "unknown error"
+          ).slice(0, 1200);
+          appendToOutput(
+            `\n\n[tool: ${ic.name} ${argsPreview}${toolRes.status !== "success" ? ` — ${toolRes.status}` : ""}]\n${bodyPreview}\n`,
+          );
+
+          innerHistory = [
+            ...innerHistory,
+            {
+              role: "assistant",
+              content:
+                innerAccum +
+                `\n<tool_call>${JSON.stringify({
+                  name: ic.name,
+                  args: ic.args,
+                })}</tool_call>`,
+            },
+          ];
+          const resultBody =
+            toolRes.status === "success"
+              ? toolRes.output ?? ""
+              : toolRes.error ?? "unknown error";
+          innerPrompt = `[tool result: ${ic.name}${
+            toolRes.status !== "success" ? " " + toolRes.status : ""
+          }]\n${resultBody}`;
+        }
+
+        patchActiveChat((c) => ({
+          ...c,
+          messages: c.messages.map((m) => {
+            if (m.id !== stepId || m.role !== "specialist_step") return m;
+            if (specError) {
+              return { ...m, status: "error", error: specError };
+            }
+            return { ...m, status: "success" };
+          }),
+        }));
+
+        // Tick the plan step bookkeeping to match the spec result.
+        if (planMsgId && planSteps.length > 0) {
+          patchPlanMsg((steps) => {
+            const idx = steps.findIndex((s) => s.status === "active");
+            if (idx < 0) return steps;
+            const next = steps.slice();
+            next[idx] = {
+              ...next[idx],
+              status: specError ? "skipped" : "done",
+            };
+            return next;
+          });
+        }
+
+        const slugLabel = slug ?? "base";
+        currentPrompt = specError
+          ? `[tool result: use_specialist ${slugLabel} error]\n${specError}`
+          : `[tool result: use_specialist ${slugLabel}]\n${specOutputAccum}`;
+
+        if (specError === "aborted") {
+          stopped = "aborted";
+          break;
+        }
+      }
+
+      if (stopped === "ok" && currentPrompt.startsWith("[tool result:")) {
+        stopped = "maxsteps";
+      }
+      if (stopped === "maxsteps") {
+        pushSystem(
+          `Specialist mode stopped after ${MAX_STEPS} steps. Send another message to continue.`,
+        );
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleSendCompare(
     userText: string,
     adapter: string,
@@ -1859,7 +2775,7 @@ function App() {
       messages: [...c.messages, userMsg, compareMsg],
     }));
 
-    const history: sidecar.ChatMessage[] = buildHistory(activeChat.messages, settings.systemPrompt, settings.useMemoryInContext ? memories : []);
+    const history: sidecar.ChatMessage[] = buildHistory(activeChat.messages, settings.systemPrompt, settings.useMemoryInContext ? memories : [], settings.learnedRules);
 
     function patchCompare(
       update: (m: ComparisonMessage) => ComparisonMessage,
@@ -1934,6 +2850,166 @@ function App() {
     setBusy(false);
   }
 
+  /**
+   * Opportunistic A/B turn: run the prompt twice on the base model with
+   * two different system prompts, render both lanes, and let the user
+   * pick the one they preferred. A "variation" pick appends the delta's
+   * rule to `settings.learnedRules` for every future turn.
+   */
+  async function runABTurn(
+    userText: string,
+    attachments: Attachment[] = [],
+  ) {
+    setInput("");
+    setBusy(true);
+    abTurnCountRef.current = 0;
+
+    const delta = selectNextDelta(abRecentDeltasRef.current, AB_DELTAS);
+
+    const promptForModel =
+      userText + formatAttachmentsForPrompt(attachments);
+
+    const userMsg: Message = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text: userText,
+      attachments: attachments.length ? attachments : undefined,
+    };
+    const abId = crypto.randomUUID();
+    const abMsg: ABComparisonMessage = {
+      id: abId,
+      role: "ab_comparison",
+      prompt: userText,
+      delta,
+      baselineText: "",
+      variationText: "",
+      pending: "baseline",
+      pick: null,
+    };
+    patchActiveChat((c) => ({
+      ...c,
+      title: c.title || (userText || attachments[0]?.name || "").slice(0, 48),
+      messages: [...c.messages, userMsg, abMsg],
+    }));
+
+    // Pre-A/B history (everything before this turn). We'll append the
+    // user prompt as the final user turn in each generate() call; the
+    // history itself doesn't include the current user message yet.
+    const priorMessages = activeChat.messages;
+    const baselineRules = settings.learnedRules;
+    const variationRules = [...settings.learnedRules, delta.rule];
+    const baselineHistory = buildHistory(
+      priorMessages,
+      settings.systemPrompt,
+      settings.useMemoryInContext ? memories : [],
+      baselineRules,
+    );
+    const variationHistory = buildHistory(
+      priorMessages,
+      settings.systemPrompt,
+      settings.useMemoryInContext ? memories : [],
+      variationRules,
+    );
+
+    function patchAB(update: (m: ABComparisonMessage) => ABComparisonMessage) {
+      patchActiveChat((c) => ({
+        ...c,
+        messages: c.messages.map((m) =>
+          m.id === abId && m.role === "ab_comparison" ? update(m) : m,
+        ),
+      }));
+    }
+
+    // Lane 1 — baseline.
+    const baselineHandle = sidecar.generate(promptForModel, {
+      messages: baselineHistory,
+      temperature: settings.temperature,
+      topP: settings.topP,
+      maxTokens: settings.maxTokens,
+      onToken: (text) =>
+        patchAB((m) => ({ ...m, baselineText: m.baselineText + text })),
+    });
+    setInflightGenId(baselineHandle.id);
+    const baselineRes = await baselineHandle.result;
+    setInflightGenId(null);
+
+    if (baselineRes.type === "error") {
+      patchAB((m) => ({
+        ...m,
+        baselineText:
+          m.baselineText + `\n\n[error: ${baselineRes.error.message}]`,
+        pending: null,
+        pick: "dismissed",
+      }));
+      setBusy(false);
+      return;
+    }
+    if ((baselineRes.result as { aborted?: boolean }).aborted) {
+      patchAB((m) => ({
+        ...m,
+        baselineText: m.baselineText + " ⏹",
+        pending: null,
+        pick: "dismissed",
+      }));
+      setBusy(false);
+      return;
+    }
+
+    // Lane 2 — variation.
+    patchAB((m) => ({ ...m, pending: "variation" }));
+    const variationHandle = sidecar.generate(promptForModel, {
+      messages: variationHistory,
+      temperature: settings.temperature,
+      topP: settings.topP,
+      maxTokens: settings.maxTokens,
+      onToken: (text) =>
+        patchAB((m) => ({ ...m, variationText: m.variationText + text })),
+    });
+    setInflightGenId(variationHandle.id);
+    const variationRes = await variationHandle.result;
+    setInflightGenId(null);
+
+    patchAB((m) => {
+      if (variationRes.type === "error") {
+        return {
+          ...m,
+          variationText:
+            m.variationText + `\n\n[error: ${variationRes.error.message}]`,
+          pending: null,
+        };
+      }
+      const r = variationRes.result as { aborted?: boolean };
+      return {
+        ...m,
+        variationText: m.variationText + (r.aborted ? " ⏹" : ""),
+        pending: null,
+      };
+    });
+    setBusy(false);
+  }
+
+  /** Commit a user's A/B pick. On "variation" we append the delta's rule
+   * to `settings.learnedRules` so it influences every future turn. */
+  function handleABPick(messageId: string, choice: ABPick) {
+    let pickedDelta: ABDelta | null = null;
+    patchActiveChat((c) => ({
+      ...c,
+      messages: c.messages.map((m) => {
+        if (m.id !== messageId || m.role !== "ab_comparison") return m;
+        if (m.pick) return m; // idempotent — transcript re-renders shouldn't double-apply
+        pickedDelta = m.delta;
+        return { ...m, pick: choice };
+      }),
+    }));
+    if (choice === "variation" && pickedDelta) {
+      const rule = (pickedDelta as ABDelta).rule;
+      setSettings((prev) => {
+        if (prev.learnedRules.includes(rule)) return prev;
+        return { ...prev, learnedRules: [...prev.learnedRules, rule] };
+      });
+    }
+  }
+
   async function handleRegenerate(assistantId: string) {
     if (busy) return;
     if (!baseLoaded) {
@@ -1973,7 +3049,7 @@ function App() {
       ],
     }));
 
-    const history: sidecar.ChatMessage[] = buildHistory(beforeUser, settings.systemPrompt, settings.useMemoryInContext ? memories : []);
+    const history: sidecar.ChatMessage[] = buildHistory(beforeUser, settings.systemPrompt, settings.useMemoryInContext ? memories : [], settings.learnedRules);
 
     setBusy(true);
     const handle = sidecar.generate(userPrompt, {
@@ -2025,7 +3101,46 @@ function App() {
     .filter((c) => c.messages.length > 0)
     .map((c) => ({ id: c.id, title: c.title, pinned: !!c.pinned }));
 
-  const installedSlugs = new Set(status?.adapters.map((a) => a.name) ?? []);
+  const [downloadedAdapters, setDownloadedAdapters] = useState<
+    { slug: string; path: string }[]
+  >([]);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      invoke<{ slug: string; path: string }[]>("list_downloaded_adapters")
+        .then((rows) => {
+          if (!cancelled) setDownloadedAdapters(rows);
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const id = window.setInterval(refresh, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+  const loadedAdapterNames = new Set(status?.adapters.map((a) => a.name) ?? []);
+  const installedSlugs = new Set<string>([
+    ...loadedAdapterNames,
+    ...downloadedAdapters.map((d) => d.slug),
+  ]);
+  const mergedAdapters: AdapterEntryMerged[] = [
+    ...(status?.adapters ?? []).map((a) => ({
+      name: a.name,
+      path: a.path,
+      base_sha: a.base_sha,
+      downloaded_only: false,
+    })),
+    ...downloadedAdapters
+      .filter((d) => !loadedAdapterNames.has(d.slug))
+      .map((d) => ({
+        name: d.slug,
+        path: d.path,
+        base_sha: null as string | null,
+        downloaded_only: true,
+      })),
+  ];
 
   const paletteActions: PaletteAction[] = [
     {
@@ -2099,7 +3214,15 @@ function App() {
       label: "Toggle Computer Use",
       hint: "grant full tool access for this turn",
       icon: PaletteIcons.Agent,
-      run: () => toggleComputerUse(),
+      run: () => setChatMode(chatMode === "cu" ? "normal" : "cu"),
+    },
+    {
+      kind: "action",
+      id: "toggle-specialist",
+      label: "Toggle Specialist mode",
+      hint: "planner LoRA delegates subtasks to other adapters",
+      icon: PaletteIcons.Agent,
+      run: () => setChatMode(chatMode === "specialist" ? "normal" : "specialist"),
     },
   ];
 
@@ -2198,9 +3321,10 @@ function App() {
           />
         ) : view === "adapters" ? (
           <AdaptersView
-            adapters={status?.adapters ?? []}
+            adapters={mergedAdapters}
             activeAdapter={status?.active_adapter ?? null}
             busy={busy}
+            baseLoaded={baseLoaded}
             onUnload={handleUnloadAdapter}
             onPickActive={pickAdapter}
             onOpenStore={() => setView("store")}
@@ -2233,6 +3357,9 @@ function App() {
               onOpenLanding={() => {
                 setBrowsePreset(null);
                 setStoreSubView("landing");
+              }}
+              onInstallAdapter={(slug) => {
+                void handleInstallAdapterBySlug(slug);
               }}
             />
           )
@@ -2292,6 +3419,8 @@ function App() {
               onLoadLocalAdapter: handleLoadLocalAdapter,
               onCreateTestAdapters: handleCreateTestAdapters,
             })}
+            mode={chatMode}
+            onSetMode={setChatMode}
           />
         ) : (
           <ChatView
@@ -2320,8 +3449,8 @@ function App() {
             compareMode={compareMode}
             onToggleCompare={toggleCompareMutex}
             compareAvailable={!!status?.active_adapter}
-            computerUseMode={computerUseMode}
-            onToggleComputerUse={toggleComputerUse}
+            mode={chatMode}
+            onSetMode={setChatMode}
             permissionPreset={permissionPreset}
             onPickPreset={handlePickPreset}
             workspace={workspace}
@@ -2330,6 +3459,7 @@ function App() {
             attachments={attachments}
             onRemoveAttachment={removeAttachment}
             onPickFiles={pickFiles}
+            onPickAB={handleABPick}
           />
         )}
       </main>
@@ -2461,6 +3591,8 @@ function WelcomeScreen({
   attachments,
   onRemoveAttachment,
   onPickFiles,
+  mode,
+  onSetMode,
 }: {
   input: string;
   onInputChange: (v: string) => void;
@@ -2482,6 +3614,8 @@ function WelcomeScreen({
   attachments: Attachment[];
   onRemoveAttachment: (id: string) => void;
   onPickFiles: () => void;
+  mode: ChatMode;
+  onSetMode: (m: ChatMode) => void;
 }) {
   const ready = !!baseSha;
   const eyebrow = `${adapter ?? "no adapter"} · ${baseLabel} · ${
@@ -2574,6 +3708,8 @@ function WelcomeScreen({
           attachments={attachments}
           onRemoveAttachment={onRemoveAttachment}
           onPickFiles={onPickFiles}
+          mode={mode}
+          onSetMode={onSetMode}
         />
       </div>
     </div>
@@ -2614,8 +3750,8 @@ function ChatView({
   compareMode,
   onToggleCompare,
   compareAvailable,
-  computerUseMode,
-  onToggleComputerUse,
+  mode,
+  onSetMode,
   permissionPreset,
   onPickPreset,
   workspace,
@@ -2624,6 +3760,7 @@ function ChatView({
   attachments,
   onRemoveAttachment,
   onPickFiles,
+  onPickAB,
 }: {
   messages: AnyMessage[];
   input: string;
@@ -2647,8 +3784,8 @@ function ChatView({
   compareMode: boolean;
   onToggleCompare: () => void;
   compareAvailable: boolean;
-  computerUseMode: boolean;
-  onToggleComputerUse: () => void;
+  mode: ChatMode;
+  onSetMode: (m: ChatMode) => void;
   permissionPreset: Preset;
   onPickPreset: (p: Preset) => void;
   workspace: Workspace | null;
@@ -2657,6 +3794,7 @@ function ChatView({
   attachments: Attachment[];
   onRemoveAttachment: (id: string) => void;
   onPickFiles: () => void;
+  onPickAB: (id: string, choice: ABPick) => void;
 }) {
   const lastAssistantId = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -2708,6 +3846,27 @@ function ChatView({
       rendered.push(<MemoryChip key={m.id} message={m} />);
       continue;
     }
+    if (m.role === "specialist_plan") {
+      rendered.push(<SpecialistPlanBubble key={m.id} message={m} />);
+      continue;
+    }
+    if (m.role === "specialist_step") {
+      rendered.push(<SpecialistStepBubble key={m.id} message={m} />);
+      continue;
+    }
+    if (m.role === "ab_comparison") {
+      rendered.push(
+        <TurnRow
+          key={m.id}
+          kind="comparison"
+          title={`a/b · ${m.delta.name}`}
+          metaLines={[m.delta.description]}
+        >
+          <ABComparePane message={m} onPick={onPickAB} />
+        </TurnRow>,
+      );
+      continue;
+    }
     rendered.push(
       <MessageTurn
         key={m.id}
@@ -2734,13 +3893,15 @@ function ChatView({
           onSubmit={onSubmit}
           disabled={busy || !baseLoaded}
           placeholder={
-            computerUseMode
+            mode === "cu"
               ? "Describe a task — I'll use tools to do it"
-              : compareMode
-                ? "Compare prompt — base vs adapter"
-                : baseLoaded
-                  ? "Reply…"
-                  : "Load the base model first"
+              : mode === "specialist"
+                ? "Describe the goal — the planner will delegate across adapters"
+                : compareMode
+                  ? "Compare prompt — base vs adapter"
+                  : baseLoaded
+                    ? "Reply…"
+                    : "Load the base model first"
           }
           baseLabel={baseLabel}
           baseId={baseId}
@@ -2752,8 +3913,8 @@ function ChatView({
           compareMode={compareMode}
           onToggleCompare={onToggleCompare}
           compareAvailable={compareAvailable}
-          computerUseMode={computerUseMode}
-          onToggleComputerUse={onToggleComputerUse}
+          mode={mode}
+          onSetMode={onSetMode}
           permissionPreset={permissionPreset}
           onPickPreset={onPickPreset}
           baseSha={baseSha}
@@ -2763,7 +3924,7 @@ function ChatView({
           onRemoveAttachment={onRemoveAttachment}
           onPickFiles={onPickFiles}
         />
-        {computerUseMode && (
+        {mode === "cu" && (
           <WorkspaceFooter
             workspace={workspace}
             preset={permissionPreset}

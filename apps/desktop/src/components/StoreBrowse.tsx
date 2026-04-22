@@ -24,6 +24,7 @@ type Props = {
   preset: { useCase?: UseCase } | null;
   onOpenAdapter: (slug: string) => void;
   onOpenLanding: () => void;
+  onInstallAdapter: (slug: string) => void;
 };
 
 export function StoreBrowse({
@@ -34,6 +35,7 @@ export function StoreBrowse({
   preset,
   onOpenAdapter,
   onOpenLanding,
+  onInstallAdapter,
 }: Props) {
   const [adapters, setAdapters] = useState<StoreAdapter[]>([]);
   const [loading, setLoading] = useState(true);
@@ -460,7 +462,7 @@ export function StoreBrowse({
                 try loosening the filters.
               </div>
             ) : view === "cards" ? (
-              <CardsGrid items={filtered} onOpen={onOpenAdapter} />
+              <CardsGrid items={filtered} onOpen={onOpenAdapter} onInstall={onInstallAdapter} />
             ) : (
               <TableView items={filtered} onOpen={onOpenAdapter} />
             )}
@@ -552,9 +554,11 @@ function Chip({ label, onDrop }: { label: string; onDrop: () => void }) {
 function CardsGrid({
   items,
   onOpen,
+  onInstall,
 }: {
   items: { adapter: StoreAdapter; compatible: boolean; installed: boolean }[];
   onOpen: (slug: string) => void;
+  onInstall: (slug: string) => void;
 }) {
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] gap-3">
@@ -565,6 +569,7 @@ function CardsGrid({
           compatible={e.compatible}
           installed={e.installed}
           onOpen={() => onOpen(e.adapter.slug)}
+          onInstall={() => onInstall(e.adapter.slug)}
         />
       ))}
     </div>
@@ -576,11 +581,13 @@ function BrowseCard({
   compatible,
   installed,
   onOpen,
+  onInstall,
 }: {
   adapter: StoreAdapter;
   compatible: boolean;
   installed: boolean;
   onOpen: () => void;
+  onInstall: () => void;
 }) {
   const accent = useCaseAccent(useCaseOf(adapter));
   return (
@@ -647,7 +654,18 @@ function BrowseCard({
             <span className="inline-flex items-center gap-1 font-mono text-[10.5px] text-app-ok">
               ●&nbsp;installed
             </span>
-          ) : null}
+          ) : (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onInstall();
+              }}
+              className="inline-flex cursor-pointer items-center gap-1 rounded-[4px] border border-app-border bg-app-accent px-2 py-0.5 font-mono text-[10.5px] text-white hover:opacity-90"
+            >
+              <Download size={10} strokeWidth={2} /> install
+            </button>
+          )}
         </div>
       </div>
     </article>

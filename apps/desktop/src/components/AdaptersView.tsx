@@ -1,12 +1,18 @@
 import { ArrowLeft, Sparkles, Trash2 } from "lucide-react";
 import { adapterAccent } from "../lib/adapter-accent";
 
-type AdapterEntry = { name: string; path: string; base_sha: string | null };
+type AdapterEntry = {
+  name: string;
+  path: string;
+  base_sha: string | null;
+  downloaded_only?: boolean;
+};
 
 type Props = {
   adapters: AdapterEntry[];
   activeAdapter: string | null;
   busy: boolean;
+  baseLoaded?: boolean;
   onUnload: (name: string) => void;
   onPickActive: (name: string | null) => void;
   onOpenStore: () => void;
@@ -17,11 +23,13 @@ export function AdaptersView({
   adapters,
   activeAdapter,
   busy,
+  baseLoaded = true,
   onUnload,
   onPickActive,
   onOpenStore,
   onBack,
 }: Props) {
+  const loadedCount = adapters.filter((a) => !a.downloaded_only).length;
   return (
     <div className="flex flex-1 flex-col">
       <header className="border-b border-app-border px-6 py-3">
@@ -38,7 +46,10 @@ export function AdaptersView({
               Adapters
             </h2>
             <span className="font-mono text-[11px] text-app-text-faint">
-              · {adapters.length} loaded
+              · {loadedCount} loaded
+              {adapters.length > loadedCount && (
+                <> · {adapters.length - loadedCount} downloaded</>
+              )}
             </span>
           </div>
           <button
@@ -96,43 +107,60 @@ export function AdaptersView({
                         )}
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5">
-                        <button
-                          onClick={() => onPickActive(active ? null : a.name)}
-                          disabled={busy}
-                          role="switch"
-                          aria-checked={active}
-                          title={
-                            active ? "Deactivate adapter" : "Activate adapter"
-                          }
-                          className="flex items-center gap-2 rounded-md px-2 py-1 hover:bg-app-surface-hover disabled:opacity-50"
-                        >
+                        {a.downloaded_only ? (
                           <span
-                            className={`font-mono text-[11px] font-medium ${
-                              active
-                                ? "text-app-accent"
-                                : "text-app-text-faint"
-                            }`}
+                            title={
+                              baseLoaded
+                                ? "Adapter cached on disk but not attached to the running base"
+                                : "Load the base model to activate"
+                            }
+                            className="rounded-md border border-app-border px-2 py-1 font-mono text-[11px] text-app-text-faint"
                           >
-                            {active ? "active" : "inactive"}
+                            downloaded
                           </span>
-                          <span
-                            className={`relative inline-block h-4 w-7 shrink-0 rounded-full transition-colors ${
-                              active ? "bg-app-accent" : "bg-app-border"
-                            }`}
+                        ) : (
+                          <button
+                            onClick={() => onPickActive(active ? null : a.name)}
+                            disabled={busy}
+                            role="switch"
+                            aria-checked={active}
+                            title={
+                              active ? "Deactivate adapter" : "Activate adapter"
+                            }
+                            className="flex items-center gap-2 rounded-md px-2 py-1 hover:bg-app-surface-hover disabled:opacity-50"
                           >
                             <span
-                              className={`absolute top-[2px] h-3 w-3 rounded-full bg-app-text shadow transition-transform ${
+                              className={`font-mono text-[11px] font-medium ${
                                 active
-                                  ? "translate-x-[14px]"
-                                  : "translate-x-[2px]"
+                                  ? "text-app-accent"
+                                  : "text-app-text-faint"
                               }`}
-                            />
-                          </span>
-                        </button>
+                            >
+                              {active ? "active" : "inactive"}
+                            </span>
+                            <span
+                              className={`relative inline-block h-4 w-7 shrink-0 rounded-full transition-colors ${
+                                active ? "bg-app-accent" : "bg-app-border"
+                              }`}
+                            >
+                              <span
+                                className={`absolute top-[2px] h-3 w-3 rounded-full bg-app-text shadow transition-transform ${
+                                  active
+                                    ? "translate-x-[14px]"
+                                    : "translate-x-[2px]"
+                                }`}
+                              />
+                            </span>
+                          </button>
+                        )}
                         <button
                           onClick={() => onUnload(a.name)}
                           disabled={busy}
-                          title="Unload from cache"
+                          title={
+                            a.downloaded_only
+                              ? "Delete downloaded adapter"
+                              : "Unload from cache"
+                          }
                           className="rounded-md p-1 text-app-text-faint opacity-60 transition-opacity hover:bg-app-surface-hover hover:text-app-danger hover:opacity-100"
                         >
                           <Trash2 size={12} strokeWidth={2} />
