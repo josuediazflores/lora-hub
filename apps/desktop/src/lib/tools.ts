@@ -130,14 +130,129 @@ export const TOOL_DEFS: ToolDef[] = [
     },
   },
   {
+    name: "search_flights",
+    description:
+      "PRIMARY TOOL for any flight query. ALWAYS use this — not web_search, not fetch_page — when " +
+      "the user asks to find, book, price, or compare flights between airports. Returns structured, " +
+      "live flight data: airline, times, stops, duration, price. The chat UI renders results as a " +
+      "rich card, so this is much better than dumping search links. " +
+      "Relative dates are fine: if the user says 'in 3 weeks' or 'next Friday', compute the concrete " +
+      "YYYY-MM-DD date yourself (today's date is in the system prompt) and pass it as departure_date. " +
+      "If the user gives a city name instead of an airport code (e.g. 'London'), pick the primary IATA " +
+      "code ('LHR' for London, 'JFK' for New York, 'LAX' for Los Angeles, etc.) and proceed — do not " +
+      "ask for clarification. For one-way, omit return_date. For round-trip with a duration like " +
+      "'week-long', set return_date = departure_date + duration.",
+    parameters: {
+      origin: {
+        type: "string",
+        required: true,
+        description: "Departure airport IATA code, e.g. 'JFK'.",
+      },
+      destination: {
+        type: "string",
+        required: true,
+        description: "Arrival airport IATA code, e.g. 'LHR'.",
+      },
+      departure_date: {
+        type: "string",
+        required: true,
+        description: "Outbound date in YYYY-MM-DD format.",
+      },
+      return_date: {
+        type: "string",
+        required: false,
+        description: "Return date in YYYY-MM-DD format. Omit for one-way.",
+      },
+      cabin_class: {
+        type: "string",
+        required: false,
+        description: "ECONOMY | PREMIUM_ECONOMY | BUSINESS | FIRST.",
+      },
+      max_stops: {
+        type: "string",
+        required: false,
+        description: "ANY | NON_STOP | ONE_STOP | TWO_PLUS_STOPS.",
+      },
+      airlines: {
+        type: "array",
+        required: false,
+        description: "Optional allow-list of airline IATA codes, e.g. ['BA', 'AA'].",
+      },
+      sort_by: {
+        type: "string",
+        required: false,
+        description: "CHEAPEST | DURATION | DEPARTURE_TIME | ARRIVAL_TIME.",
+      },
+      passengers: {
+        type: "number",
+        required: false,
+        description: "Number of adult passengers (default 1).",
+      },
+    },
+  },
+  {
+    name: "search_dates",
+    description:
+      "PRIMARY TOOL for 'cheapest dates to fly' queries. ALWAYS use this — not web_search — when " +
+      "the user wants the cheapest travel dates across a flexible range (e.g. 'cheapest week in May', " +
+      "'best time to fly to Paris this summer'). Returns a list of date candidates ranked by price. " +
+      "Convert relative phrases ('this summer', 'next month') to concrete start_date / end_date in " +
+      "YYYY-MM-DD yourself. Pick a primary IATA airport code if the user gives a city name — do not " +
+      "ask for clarification.",
+    parameters: {
+      origin: {
+        type: "string",
+        required: true,
+        description: "Departure airport IATA code.",
+      },
+      destination: {
+        type: "string",
+        required: true,
+        description: "Arrival airport IATA code.",
+      },
+      start_date: {
+        type: "string",
+        required: true,
+        description: "Start of date range in YYYY-MM-DD.",
+      },
+      end_date: {
+        type: "string",
+        required: true,
+        description: "End of date range in YYYY-MM-DD.",
+      },
+      trip_duration: {
+        type: "number",
+        required: false,
+        description: "Trip duration in days, for round-trips.",
+      },
+      is_round_trip: {
+        type: "boolean",
+        required: false,
+        description: "True for round-trip; false/omitted for one-way.",
+      },
+      cabin_class: {
+        type: "string",
+        required: false,
+        description: "ECONOMY | PREMIUM_ECONOMY | BUSINESS | FIRST.",
+      },
+      passengers: {
+        type: "number",
+        required: false,
+        description: "Number of adult passengers (default 1).",
+      },
+    },
+  },
+  {
     name: "web_search",
     description:
       "Search the web. Returns up to 10 hits as {title, url, snippet}. " +
       "SNIPPETS ARE PREVIEWS, NOT ANSWERS — after reviewing the results, call fetch_page on " +
       "the URL most likely to contain what the user asked for, then answer from that page's " +
       "content. Do not answer a factual question from snippets alone. Use when the user asks " +
-      "about current events, weather, prices, docs, recent news — anything time-sensitive or " +
-      "outside your training data.",
+      "about current events, weather, docs, recent news — anything time-sensitive or " +
+      "outside your training data. " +
+      "DO NOT use for flight searches — use search_flights or search_dates instead; those return " +
+      "structured, live flight data directly.",
     parameters: {
       query: { type: "string", required: true },
       count: {
@@ -491,6 +606,30 @@ export async function runTool(
         const out = formatMemoryList(filtered.slice(0, limit));
         return { status: "success", output: out };
       }
+      case "search_flights": {
+        try {
+          const fliResult = await invoke<FliMcpResult>("mcp_fli_call", {
+            toolName: "search_flights",
+            args: buildFliFlightsArgs(args),
+          });
+          const flights = adaptFliFlights(fliResult, args);
+          return { status: "success", output: JSON.stringify(flights) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "search_dates": {
+        try {
+          const fliResult = await invoke<FliMcpResult>("mcp_fli_call", {
+            toolName: "search_dates",
+            args: buildFliDatesArgs(args),
+          });
+          const dates = adaptFliDates(fliResult, args);
+          return { status: "success", output: JSON.stringify(dates) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
       case "compare_outputs":
         // Intentional: this tool needs sidecar.generate + React state
         // (settings, downloadedAdapters, status). Handled inside the turn
@@ -533,6 +672,257 @@ function clampLimit(v: unknown, fallback: number, max: number): number {
   if (n <= 0) return fallback;
   return Math.min(n, max);
 }
+
+/** fli-mcp `tools/call` response envelope. */
+type FliMcpResult = {
+  content?: { type: string; text?: string }[];
+  structuredContent?: unknown;
+  isError?: boolean;
+};
+
+/** Decoded body of a successful search_flights or search_dates call. */
+type FliDecoded = {
+  success?: boolean;
+  error?: string;
+  flights?: FliFlight[];
+  date_prices?: FliDatePrice[];
+};
+
+type FliFlight = {
+  price: number;
+  currency?: string;
+  legs: FliLeg[];
+};
+
+type FliLeg = {
+  departure_airport: string;
+  arrival_airport: string;
+  departure_time: string; // ISO "YYYY-MM-DDTHH:MM:SS"
+  arrival_time: string;
+  duration: number; // minutes
+  airline: string;
+  airline_code: string;
+  flight_number?: string;
+};
+
+type FliDatePrice = {
+  date?: string;
+  departure_date?: string;
+  return_date?: string;
+  price?: number;
+  price_usd?: number;
+  currency?: string;
+};
+
+function buildFliFlightsArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    origin: String(args.origin ?? "").toUpperCase(),
+    destination: String(args.destination ?? "").toUpperCase(),
+    departure_date: args.departure_date,
+  };
+  if (args.return_date) out.return_date = args.return_date;
+  if (args.cabin_class) out.cabin_class = args.cabin_class;
+  if (args.max_stops) out.max_stops = args.max_stops;
+  if (args.sort_by) out.sort_by = args.sort_by;
+  if (Array.isArray(args.airlines) && args.airlines.length) {
+    out.airlines = args.airlines;
+  }
+  return out;
+}
+
+function buildFliDatesArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    origin: String(args.origin ?? "").toUpperCase(),
+    destination: String(args.destination ?? "").toUpperCase(),
+    from_date: args.start_date,
+    to_date: args.end_date,
+  };
+  if (args.cabin_class) out.cabin_class = args.cabin_class;
+  if (args.trip_duration) out.duration = args.trip_duration;
+  return out;
+}
+
+function decodeFli(result: FliMcpResult): FliDecoded {
+  if (result.isError) {
+    const text = result.content?.[0]?.text ?? "unknown fli error";
+    throw new Error(text);
+  }
+  const text = result.content?.[0]?.text;
+  if (!text) return {};
+  try {
+    return JSON.parse(text) as FliDecoded;
+  } catch {
+    // Some fli builds put the structured body at structuredContent; fall back.
+    if (result.structuredContent && typeof result.structuredContent === "object") {
+      return result.structuredContent as FliDecoded;
+    }
+    return {};
+  }
+}
+
+function adaptFliFlights(
+  result: FliMcpResult,
+  args: Record<string, unknown>,
+): FlightResultShape[] {
+  const decoded = decodeFli(result);
+  if (decoded.error) throw new Error(decoded.error);
+  const flights = decoded.flights ?? [];
+
+  const origin = String(args.origin ?? "").toUpperCase();
+  const destination = String(args.destination ?? "").toUpperCase();
+  const returnDate = args.return_date as string | undefined;
+  const departureDate = args.departure_date as string | undefined;
+
+  const adapted: FlightResultShape[] = [];
+  for (const f of flights) {
+    const outbound = sliceOutboundLegs(f.legs, destination);
+    if (outbound.length === 0) continue;
+    const first = outbound[0];
+    const last = outbound[outbound.length - 1];
+    const totalDuration =
+      (new Date(last.arrival_time).getTime() -
+        new Date(first.departure_time).getTime()) /
+      60000;
+    adapted.push({
+      airline_code: first.airline_code,
+      airline_name: first.airline,
+      origin,
+      destination,
+      departure_time: extractHHMM(first.departure_time),
+      arrival_time: extractHHMM(last.arrival_time),
+      duration_minutes: Math.round(
+        totalDuration > 0
+          ? totalDuration
+          : outbound.reduce((sum, l) => sum + (l.duration || 0), 0),
+      ),
+      stops: Math.max(0, outbound.length - 1),
+      price_usd: Math.round(f.price),
+      booking_url: buildGoogleFlightsUrl(
+        origin,
+        destination,
+        departureDate,
+        returnDate,
+      ),
+    });
+  }
+  return adapted;
+}
+
+function adaptFliDates(
+  result: FliMcpResult,
+  args: Record<string, unknown>,
+): DateResultShape[] {
+  const decoded = decodeFli(result);
+  if (decoded.error) throw new Error(decoded.error);
+  const raw = decoded.date_prices ?? [];
+  const origin = String(args.origin ?? "").toUpperCase();
+  const destination = String(args.destination ?? "").toUpperCase();
+  const tripDuration =
+    typeof args.trip_duration === "number" ? Math.floor(args.trip_duration) : 7;
+
+  const out: DateResultShape[] = [];
+  for (const entry of raw) {
+    const dep = entry.departure_date ?? entry.date;
+    if (!dep) continue;
+    let ret = entry.return_date;
+    if (!ret) {
+      const retDate = new Date(dep);
+      retDate.setDate(retDate.getDate() + tripDuration);
+      ret = retDate.toISOString().slice(0, 10);
+    }
+    const price = entry.price_usd ?? entry.price ?? 0;
+    out.push({
+      departure_date: dep,
+      return_date: ret,
+      price_usd: Math.round(price),
+      booking_url: buildGoogleFlightsUrl(origin, destination, dep, ret),
+    });
+  }
+  return out;
+}
+
+function sliceOutboundLegs(legs: FliLeg[], destination: string): FliLeg[] {
+  if (legs.length === 0) return [];
+  // Find the first leg whose arrival matches the destination city. That's
+  // the end of the outbound journey. All legs up to and including it.
+  const destLower = destination.toLowerCase();
+  for (let i = 0; i < legs.length; i++) {
+    if (
+      legs[i].arrival_airport.toLowerCase().includes(destLower) ||
+      airportNameImpliesCode(legs[i].arrival_airport, destination)
+    ) {
+      return legs.slice(0, i + 1);
+    }
+  }
+  return legs;
+}
+
+/** Very loose match: airport name contains the IATA code or a common synonym. */
+function airportNameImpliesCode(name: string, code: string): boolean {
+  const synonyms: Record<string, string[]> = {
+    LHR: ["heathrow"],
+    LGW: ["gatwick"],
+    JFK: ["kennedy"],
+    LGA: ["laguardia"],
+    EWR: ["newark"],
+    LAX: ["los angeles"],
+    CDG: ["charles de gaulle"],
+    ORY: ["orly"],
+    NRT: ["narita"],
+    HND: ["haneda"],
+  };
+  const lower = name.toLowerCase();
+  if (lower.includes(code.toLowerCase())) return true;
+  const syns = synonyms[code.toUpperCase()] ?? [];
+  return syns.some((s) => lower.includes(s));
+}
+
+function extractHHMM(iso: string): string {
+  // ISO "YYYY-MM-DDTHH:MM:SS" — take the HH:MM part
+  const m = iso.match(/T(\d{2}:\d{2})/);
+  return m ? m[1] : iso;
+}
+
+function buildGoogleFlightsUrl(
+  origin: string,
+  destination: string,
+  depart: string | undefined,
+  ret: string | undefined,
+): string {
+  const base = `https://www.google.com/travel/flights?q=`;
+  const dep = depart ?? "";
+  const r = ret ?? "";
+  const q = `flights+from+${origin}+to+${destination}${
+    dep ? `+on+${dep}` : ""
+  }${r ? `+returning+${r}` : ""}`;
+  return base + q;
+}
+
+function stringifyFliError(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+type FlightResultShape = {
+  airline_code: string;
+  airline_name: string;
+  origin: string;
+  destination: string;
+  departure_time: string;
+  arrival_time: string;
+  duration_minutes: number;
+  stops: number;
+  price_usd: number;
+  booking_url?: string;
+};
+
+type DateResultShape = {
+  departure_date: string;
+  return_date?: string;
+  price_usd: number;
+  booking_url?: string;
+};
 
 function formatMemoryList(mems: Memory[]): string {
   if (mems.length === 0) return "(no memories)";

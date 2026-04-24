@@ -1829,6 +1829,8 @@ function App() {
     if (webToolsEnabled) {
       allowedToolNames.add("fetch_page");
       allowedToolNames.add("web_search");
+      allowedToolNames.add("search_flights");
+      allowedToolNames.add("search_dates");
     }
     const toolDefs =
       allowedToolNames.size > 0
