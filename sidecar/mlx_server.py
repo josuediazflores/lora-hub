@@ -255,6 +255,66 @@ def _maybe_convert_peft(src: Path) -> Path:
     return cache_dir
 
 
+def _base_hidden_size() -> int | None:
+    """Best-effort probe of the loaded base model's logical hidden_size.
+    MLX models expose this via args.hidden_size for flat configs, or via a
+    nested text_config dict for multi-modal models (Gemma 4 uses the latter)."""
+    args = getattr(STATE.model, "args", None)
+    if args is None:
+        return None
+    direct = getattr(args, "hidden_size", None)
+    if isinstance(direct, int):
+        return direct
+    tc = getattr(args, "text_config", None)
+    if isinstance(tc, dict):
+        hs = tc.get("hidden_size")
+        if isinstance(hs, int):
+            return hs
+    return None
+
+
+def _assert_adapter_shapes_match(adapter_dir: Path, cfg: dict) -> None:
+    """Pre-flight: compare the adapter's attention q_proj LoRA in_dim against
+    the loaded base's logical hidden_size. q_proj is hidden→hidden, so
+    lora_a.shape[0] == hidden_size unambiguously. We avoid mlp.down_proj (whose
+    in_dim is the intermediate size) and comparing against base weight tensors
+    directly (those are quantization-packed, e.g. 4-bit → shape[-1] = logical/8
+    — which was a false-positive source)."""
+    import safetensors
+
+    weights_path = adapter_dir / "adapters.safetensors"
+    if not weights_path.exists():
+        return
+
+    base_hidden = _base_hidden_size()
+    if base_hidden is None:
+        return  # can't probe — skip check rather than false-positive
+
+    adapter_hidden: int | None = None
+    try:
+        with safetensors.safe_open(str(weights_path), framework="numpy") as sf:
+            for tname in sf.keys():
+                if tname.endswith(".self_attn.q_proj.lora_a"):
+                    shape = sf.get_slice(tname).get_shape()
+                    if len(shape) >= 1:
+                        adapter_hidden = int(shape[0])
+                    break
+    except Exception as e:
+        log(f"adapter shape probe failed, skipping check: {e}")
+        return
+
+    if adapter_hidden is None or adapter_hidden == base_hidden:
+        return
+
+    source_repo = cfg.get("source_repo") or cfg.get("base_model_id")
+    hint = f" — adapter appears to be for {source_repo!r}" if source_repo else ""
+    raise SidecarError(
+        "BASE_MISMATCH",
+        f"adapter hidden_size {adapter_hidden} does not match base hidden_size "
+        f"{base_hidden}{hint}. loaded base: {STATE.base_model_id}",
+    )
+
+
 def op_load_adapter(req: dict) -> dict:
     if STATE.model is None:
         raise SidecarError("BASE_NOT_LOADED", "load a base before loading adapters")
@@ -280,6 +340,8 @@ def op_load_adapter(req: dict) -> dict:
             "BASE_MISMATCH",
             f"adapter base_sha {declared_base_sha[:12]} != loaded {STATE.base_sha[:12]}",
         )
+
+    _assert_adapter_shapes_match(p, cfg)
 
     lora_params = cfg.get("lora_parameters") or {}
     num_layers = cfg.get("num_layers", 0)

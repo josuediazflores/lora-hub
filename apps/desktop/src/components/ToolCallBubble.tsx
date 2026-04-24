@@ -1,5 +1,12 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { DottedSpinner } from "./DottedSpinner";
+import { ToolCallChip } from "./ToolCallChip";
+import {
+  TOOL_RESULT_RENDERERS,
+  brandForTool,
+  labelForTool,
+} from "../lib/toolRenderers";
 
 export type ToolStatus = "pending" | "success" | "error" | "denied";
 
@@ -19,12 +26,127 @@ type Props = {
   message: ToolCallMessage;
 };
 
-/**
- * Terminal-block styling. Status glyph + tool name + arg summary on the
- * header row; a 2px plum rail on the left when expanded; args and output
- * in mono code blocks.
- */
 export function ToolCallBubble({ message }: Props) {
+  if (message.status === "pending") {
+    return <PendingChip message={message} />;
+  }
+
+  const customResult =
+    message.status === "success" && message.output !== undefined
+      ? TOOL_RESULT_RENDERERS[message.name]?.(message.output, message.args)
+      : null;
+
+  if (customResult) {
+    return <CustomResult message={message} rendered={customResult} />;
+  }
+
+  return <TerminalBlock message={message} />;
+}
+
+function PendingChip({ message }: { message: ToolCallMessage }) {
+  return (
+    <div className="flex flex-col items-start gap-2">
+      <ToolCallChip
+        label={labelForTool(message.name)}
+        brand={brandForTool(message.name)}
+      />
+      <DottedSpinner size={16} />
+    </div>
+  );
+}
+
+function CustomResult({
+  message,
+  rendered,
+}: {
+  message: ToolCallMessage;
+  rendered: React.ReactNode;
+}) {
+  const [showDetails, setShowDetails] = useState(false);
+  return (
+    <div className="flex flex-col items-start gap-2">
+      <button
+        type="button"
+        onClick={() => setShowDetails((v) => !v)}
+        className="inline-flex items-center text-left"
+        title={showDetails ? "Hide details" : "Show details"}
+      >
+        <ToolCallChip
+          label={labelForTool(message.name)}
+          brand={brandForTool(message.name)}
+        />
+      </button>
+      {rendered}
+      {showDetails && (
+        <div className="w-full space-y-2 rounded-md border border-app-border bg-app-surface/60 p-2 font-mono text-[11px]">
+          <CollapsibleSection label="args">
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-app-text">
+              {JSON.stringify(message.args, null, 2)}
+            </pre>
+          </CollapsibleSection>
+          {message.output !== undefined && message.output.length > 0 && (
+            <CollapsibleSection
+              label={
+                message.truncated
+                  ? `raw output (truncated · ${message.output.length} chars)`
+                  : `raw output · ${message.output.length} chars`
+              }
+            >
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-app-text">
+                {message.output}
+              </pre>
+            </CollapsibleSection>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CollapsibleSection({
+  label,
+  tone,
+  defaultOpen = false,
+  children,
+}: {
+  label: string;
+  tone?: "warn" | "danger";
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const labelClass =
+    tone === "danger"
+      ? "text-app-danger"
+      : tone === "warn"
+        ? "text-app-warn"
+        : "text-app-text-faint";
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`flex w-full items-center gap-1 text-[10px] uppercase tracking-[0.1em] ${labelClass} transition-colors hover:text-app-text`}
+      >
+        <span className="shrink-0">
+          {open ? (
+            <ChevronDown size={10} strokeWidth={2} />
+          ) : (
+            <ChevronRight size={10} strokeWidth={2} />
+          )}
+        </span>
+        <span>{label}</span>
+      </button>
+      {open && (
+        <div className="mt-1 rounded-sm bg-app-bg/70 px-2 py-1">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TerminalBlock({ message }: { message: ToolCallMessage }) {
   const [expanded, setExpanded] = useState(message.status !== "success");
   const argsLine = compactArgs(message.args);
 
@@ -146,8 +268,6 @@ function Section({
   );
 }
 
-/** Inline compact arg summary like `path="src/App.tsx"` that fits on the
- * collapsed header row. Long values are truncated. */
 function compactArgs(args: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(args)) {

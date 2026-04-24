@@ -1,6 +1,7 @@
 mod attachments;
 mod audit;
 mod cache;
+mod mcp;
 mod memory;
 mod permissions;
 mod sidecar;
@@ -234,6 +235,7 @@ pub fn run() {
             let preset = permissions::load(&data_dir);
             handle.manage(WorkspaceState::new(ws));
             handle.manage(PresetState::new(preset));
+            handle.manage(Arc::new(mcp::FliMcpState::new()));
 
             tauri::async_runtime::block_on(async move {
                 match Sidecar::spawn(&handle).await {
@@ -273,6 +275,8 @@ pub fn run() {
             memory::memory_tool_save,
             attachments::read_attachment,
             cache::list_cached_hf_models,
+            cache::delete_cached_hf_model,
+            mcp::mcp_fli_call,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
