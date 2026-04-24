@@ -925,6 +925,7 @@ function App() {
     | null
   >(null);
   const [pendingBase, setPendingBase] = useState<StoreBase | null>(null);
+  const [pendingDeleteBase, setPendingDeleteBase] = useState<StoreBase | null>(null);
   const [compareMode, setCompareMode] = useState<boolean>(false);
   const [computerUseMode, setComputerUseMode] = useState<boolean>(false);
   const [specialistMode, setSpecialistMode] = useState<boolean>(false);
@@ -1330,6 +1331,17 @@ function App() {
       return;
     }
     void handleLoadBase(base);
+  }
+
+  async function handleDeleteBase(base: StoreBase) {
+    try {
+      await invoke("delete_cached_hf_model", { hfRepo: base.hf_repo });
+      const refreshed = await listCachedHfModels();
+      setCachedRepos(refreshed);
+      pushSystem(`Deleted cached files for ${base.name}.`);
+    } catch (e) {
+      pushSystem(`Failed to delete ${base.name}: ${String(e)}`);
+    }
   }
 
   async function handleLoadBase(base: StoreBase) {
@@ -3093,7 +3105,16 @@ function App() {
     await sidecar.abortGeneration(inflightGenId);
   }
 
-  function pickAdapter(name: string | null) {
+  async function pickAdapter(name: string | null) {
+    if (name === null) {
+      setStatus((s) => (s ? { ...s, active_adapter: null } : s));
+      return;
+    }
+    const err = await ensureAdapterAttached(name);
+    if (err) {
+      pushSystem(err);
+      return;
+    }
     setStatus((s) => (s ? { ...s, active_adapter: name } : s));
   }
 
@@ -3317,6 +3338,7 @@ function App() {
             busy={busy}
             cachedRepos={cachedRepos}
             onLoad={requestLoadBase}
+            onDelete={(b) => setPendingDeleteBase(b)}
             onBack={() => setView("chat")}
           />
         ) : view === "adapters" ? (
@@ -3396,7 +3418,7 @@ function App() {
               const b = bases.find((x) => x.base_id === id);
               if (b) requestLoadBase(b);
             }}
-            adapters={status?.adapters ?? []}
+            adapters={mergedAdapters}
             adapter={status?.active_adapter ?? null}
             onPickAdapter={pickAdapter}
             baseSha={status?.base_sha ?? null}
@@ -3440,7 +3462,7 @@ function App() {
               const b = bases.find((x) => x.base_id === id);
               if (b) requestLoadBase(b);
             }}
-            adapters={status?.adapters ?? []}
+            adapters={mergedAdapters}
             adapter={status?.active_adapter ?? null}
             onPickAdapter={pickAdapter}
             onRegenerate={handleRegenerate}
@@ -3486,6 +3508,33 @@ function App() {
             const b = pendingBase;
             setPendingBase(null);
             void handleLoadBase(b);
+          }}
+        />
+      )}
+
+      {pendingDeleteBase && (
+        <ConfirmModal
+          title="Delete cached model?"
+          confirmLabel={`Delete ${pendingDeleteBase.name}`}
+          body={
+            <>
+              <p>
+                This removes{" "}
+                <strong className="text-app-text">{pendingDeleteBase.name}</strong>{" "}
+                from <code className="text-app-text-muted">~/.cache/huggingface/hub/</code>,
+                reclaiming {(pendingDeleteBase.size_bytes / 1e9).toFixed(1)} GB of disk.
+              </p>
+              <p className="mt-2 text-xs text-app-text-faint">
+                Re-loading this model later will re-download it from HuggingFace.
+                Your adapters are stored separately and are not affected.
+              </p>
+            </>
+          }
+          onCancel={() => setPendingDeleteBase(null)}
+          onConfirm={() => {
+            const b = pendingDeleteBase;
+            setPendingDeleteBase(null);
+            void handleDeleteBase(b);
           }}
         />
       )}
@@ -4017,6 +4066,7 @@ function MessageTurn({
       title={message.adapter ?? "assistant"}
       metaLines={[message.pending ? "streaming…" : undefined, baseLabel]}
       actions={message.pending || canRegenerate ? actions : null}
+      pending={!!message.pending}
     >
       {parsed?.thought && (
         <ThoughtDisclosure thought={parsed.thought} phase={parsed.phase} />
@@ -4126,6 +4176,7 @@ function CompareTurn({
       title={`compare · ${message.adapter}`}
       metaLines={["same prompt · base vs adapter"]}
       actions={actions || null}
+      pending={!!message.pending}
     >
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <ComparePane

@@ -14,6 +14,10 @@ type Props = {
   metaLines?: (string | undefined | null)[];
   /** Optional right-aligned action buttons inside the gutter, hover-revealed. */
   actions?: ReactNode;
+  /** If true, `actions` are always visible instead of hover-gated. Use for
+   * urgent affordances during streaming (e.g. Stop), where requiring a
+   * precise mouse hover to discover the button is a real UX problem. */
+  pending?: boolean;
   /** Turn body — bubble, tool-call card, etc. */
   children: ReactNode;
 };
@@ -32,6 +36,7 @@ export function TurnRow({
   timeLabel,
   metaLines,
   actions,
+  pending,
   children,
 }: Props) {
   const accent = adapter ? adapterAccent(adapter).text : null;
@@ -86,7 +91,11 @@ export function TurnRow({
           </div>
         ))}
         {actions && (
-          <div className="mt-1.5 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 max-[1100px]:mt-0 max-[1100px]:opacity-100">
+          <div
+            className={`mt-1.5 flex gap-1 transition-opacity max-[1100px]:mt-0 max-[1100px]:opacity-100 ${
+              pending ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+            }`}
+          >
             {actions}
           </div>
         )}

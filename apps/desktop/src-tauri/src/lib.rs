@@ -273,6 +273,7 @@ pub fn run() {
             memory::memory_tool_save,
             attachments::read_attachment,
             cache::list_cached_hf_models,
+            cache::delete_cached_hf_model,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

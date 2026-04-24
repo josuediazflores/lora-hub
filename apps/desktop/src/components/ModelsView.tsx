@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Check, Download } from "lucide-react";
+import { ArrowLeft, Check, Download, Trash2 } from "lucide-react";
 import type { StoreBase } from "../lib/store";
 import { describeBase } from "../lib/base-descriptions";
 import { memoryFit, systemMemoryBytes, type MemoryFit } from "../lib/system";
@@ -13,10 +13,11 @@ type Props = {
    * so users can tell hot-loads from fresh downloads at a glance. */
   cachedRepos: Set<string>;
   onLoad: (base: StoreBase) => void;
+  onDelete?: (base: StoreBase) => void;
   onBack: () => void;
 };
 
-export function ModelsView({ bases, activeBaseId, busy, cachedRepos, onLoad, onBack }: Props) {
+export function ModelsView({ bases, activeBaseId, busy, cachedRepos, onLoad, onDelete, onBack }: Props) {
   const [totalMem, setTotalMem] = useState<number>(0);
   const [search, setSearch] = useState("");
   const [family, setFamily] = useState<string | null>(null);
@@ -139,27 +140,40 @@ export function ModelsView({ bases, activeBaseId, busy, cachedRepos, onLoad, onB
                       {b.description || describeBase(b)}
                     </p>
                   </div>
-                  <button
-                    onClick={() => onLoad(b)}
-                    disabled={busy || active}
-                    className={`flex shrink-0 items-center gap-1.5 rounded-md px-3 py-1.5 font-mono text-[11px] font-medium ${
-                      active
-                        ? "cursor-default bg-app-surface-hover text-app-text-muted"
-                        : "bg-app-accent text-app-bg hover:bg-app-accent-soft disabled:opacity-50"
-                    }`}
-                  >
-                    {active ? (
-                      <>
-                        <Check size={11} strokeWidth={2.5} />
-                        loaded
-                      </>
-                    ) : (
-                      <>
-                        <Download size={11} strokeWidth={2} />
-                        load
-                      </>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {!active && cachedRepos.has(b.hf_repo.toLowerCase()) && onDelete && (
+                      <button
+                        onClick={() => onDelete(b)}
+                        disabled={busy}
+                        title="Delete cached files to reclaim disk space"
+                        className="flex items-center gap-1 rounded-md border border-app-border px-2.5 py-1.5 font-mono text-[11px] text-app-text-muted hover:border-app-danger/50 hover:bg-app-danger/10 hover:text-app-danger disabled:opacity-50"
+                      >
+                        <Trash2 size={11} strokeWidth={2} />
+                        delete
+                      </button>
                     )}
-                  </button>
+                    <button
+                      onClick={() => onLoad(b)}
+                      disabled={busy || active}
+                      className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 font-mono text-[11px] font-medium ${
+                        active
+                          ? "cursor-default bg-app-surface-hover text-app-text-muted"
+                          : "bg-app-accent text-app-bg hover:bg-app-accent-soft disabled:opacity-50"
+                      }`}
+                    >
+                      {active ? (
+                        <>
+                          <Check size={11} strokeWidth={2.5} />
+                          loaded
+                        </>
+                      ) : (
+                        <>
+                          <Download size={11} strokeWidth={2} />
+                          load
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
                 <div className="mt-2.5 border-t border-app-border pt-2 font-mono text-[10px] text-app-text-faint">
                   sha {b.base_sha.slice(0, 24)}…

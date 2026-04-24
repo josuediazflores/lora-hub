@@ -42,3 +42,23 @@ pub fn list_cached_hf_models() -> Vec<String> {
     }
     out
 }
+
+#[tauri::command]
+pub fn delete_cached_hf_model(hf_repo: String) -> Result<(), String> {
+    let Some(home) = dirs::home_dir() else {
+        return Err("no home dir".into());
+    };
+    let (org, repo) = hf_repo
+        .split_once('/')
+        .ok_or_else(|| format!("invalid hf_repo (expected org/repo): {hf_repo}"))?;
+    let dir_name = format!("models--{org}--{repo}");
+    let path = home
+        .join(".cache")
+        .join("huggingface")
+        .join("hub")
+        .join(&dir_name);
+    if !path.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&path).map_err(|e| format!("remove {dir_name}: {e}"))
+}
