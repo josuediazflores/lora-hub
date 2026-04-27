@@ -124,7 +124,15 @@ pub async fn is_allowed_url(url: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("resolve {host}: {e}"))?;
     for addr in addrs {
-        let ip = addr.ip();
+        let mut ip = addr.ip();
+        // Canonicalize IPv4-mapped IPv6 (::ffff:a.b.c.d) to its IPv4 form so
+        // attackers can't bypass IPv4 loopback/private checks via the
+        // `[::ffff:127.0.0.1]` URL form.
+        if let std::net::IpAddr::V6(v6) = ip {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                ip = std::net::IpAddr::V4(v4);
+            }
+        }
         if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
             return Err(format!("blocked IP {ip} (loopback/unspecified/multicast)"));
         }
@@ -138,9 +146,6 @@ pub async fn is_allowed_url(url: &str) -> Result<(), String> {
                 }
             }
             std::net::IpAddr::V6(v6) => {
-                if v6.is_loopback() || v6.is_unspecified() {
-                    return Err(format!("blocked IP {v6}"));
-                }
                 let segments = v6.segments();
                 // fc00::/7 (unique local) and fe80::/10 (link-local).
                 if (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80 {
