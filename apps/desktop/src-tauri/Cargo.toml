@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "LoRA Hub — local LLM with hot-swappable LoRA adapters"
 authors = ["LoRA Hub"]
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "desktop_lib"
@@ -40,6 +41,8 @@ dirs = "5"
 rusqlite = { version = "0.32", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.25"
+regex = "1"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

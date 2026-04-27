@@ -26,4 +26,4 @@ Pre-alpha. Architecture and platform decisions in progress — see `docs/PLAN.md
 
 ## License
 
-TBD
+MIT — see [LICENSE](./LICENSE).

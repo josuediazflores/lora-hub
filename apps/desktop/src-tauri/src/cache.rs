@@ -51,14 +51,36 @@ pub fn delete_cached_hf_model(hf_repo: String) -> Result<(), String> {
     let (org, repo) = hf_repo
         .split_once('/')
         .ok_or_else(|| format!("invalid hf_repo (expected org/repo): {hf_repo}"))?;
+    // HF's slug grammar permits letters, digits, `.`, `-`, `_` only. Reject
+    // anything that could form a path-traversal sequence (`..`, `/`, `\`)
+    // or any other shell metacharacter — `.join()` in Rust will follow
+    // slashes inside a single segment, so the regex is the real guard.
+    static SEG_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let seg_re = SEG_RE.get_or_init(|| regex::Regex::new(r"^[A-Za-z0-9._-]+$").unwrap());
+    if !seg_re.is_match(org) || !seg_re.is_match(repo) || org == ".." || repo == ".." {
+        return Err(format!("invalid hf_repo segment: {hf_repo}"));
+    }
     let dir_name = format!("models--{org}--{repo}");
-    let path = home
+    let cache_root = home
         .join(".cache")
         .join("huggingface")
-        .join("hub")
-        .join(&dir_name);
+        .join("hub");
+    let path = cache_root.join(&dir_name);
     if !path.exists() {
         return Ok(());
+    }
+    // Belt-and-suspenders: refuse to delete anything outside the HF cache
+    // root. Canonicalize to defeat symlinks pointing elsewhere.
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("canonicalize {dir_name}: {e}"))?;
+    let cache_canonical = cache_root
+        .canonicalize()
+        .map_err(|e| format!("canonicalize cache root: {e}"))?;
+    if !canonical.starts_with(&cache_canonical) {
+        return Err(format!(
+            "refusing to delete {dir_name}: resolves outside HF cache"
+        ));
     }
     std::fs::remove_dir_all(&path).map_err(|e| format!("remove {dir_name}: {e}"))
 }

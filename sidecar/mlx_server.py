@@ -509,6 +509,8 @@ def _parse_gemma4_body(body: str) -> dict:
     The body between `<|tool_call>` and `<tool_call|>` contains one or more
     `call:name{args}` fragments. We return the first one. Args use unquoted
     keys and `<|"|>`-delimited strings; we reuse mlx_lm's parser.
+    Tool-call extraction reuses ml-explore/mlx-examples (MIT) — see
+    `mlx_lm.tool_parsers.gemma4`.
     """
     from mlx_lm.tool_parsers.gemma4 import parse_tool_call  # type: ignore
 

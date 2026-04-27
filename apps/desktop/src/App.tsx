@@ -75,8 +75,6 @@ import { ChatView } from "./components/ChatView";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { MemoryApprovalModal } from "./components/MemoryApprovalModal";
 
-const USER_NAME = "Josue Diaz Flores";
-
 type View = SidebarView;
 
 function App() {
@@ -2680,7 +2678,7 @@ function App() {
         onOpenAdapters={() => setView("adapters")}
         onOpenSettings={() => setView("settings")}
         onTogglePin={togglePin}
-        userName={USER_NAME}
+        userName="You"
       />
 
       <main className="flex flex-1 flex-col">

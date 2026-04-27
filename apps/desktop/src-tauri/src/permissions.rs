@@ -103,6 +103,55 @@ pub fn is_allowed_write(preset: Preset) -> Result<(), String> {
     Ok(())
 }
 
+/// Reject URLs that would let an agent reach the user's loopback,
+/// link-local, or RFC-1918 networks. Cloud-metadata IP (169.254.169.254)
+/// is the highest-stakes target — a prompt-injected page asking the
+/// model to fetch it would otherwise harvest cloud creds on a hosted
+/// dev box. Resolves the host once (DNS rebind is partially mitigated
+/// by the second-resolve in reqwest, but the worst-known endpoints are
+/// caught here).
+pub async fn is_allowed_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("only http(s) URLs are allowed (got {scheme})"));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "url has no host".to_string())?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("resolve {host}: {e}"))?;
+    for addr in addrs {
+        let ip = addr.ip();
+        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+            return Err(format!("blocked IP {ip} (loopback/unspecified/multicast)"));
+        }
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                if v4.octets() == [169, 254, 169, 254] {
+                    return Err("blocked: cloud metadata IP".into());
+                }
+                if v4.is_link_local() || v4.is_private() {
+                    return Err(format!("blocked private IP {v4}"));
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback() || v6.is_unspecified() {
+                    return Err(format!("blocked IP {v6}"));
+                }
+                let segments = v6.segments();
+                // fc00::/7 (unique local) and fe80::/10 (link-local).
+                if (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80 {
+                    return Err(format!("blocked private IPv6 {v6}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

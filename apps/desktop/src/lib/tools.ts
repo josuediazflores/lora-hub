@@ -550,6 +550,12 @@ export async function runTool(
         };
       }
       case "run_command": {
+        // TODO(security): wire PermissionPrompt for non-allowlisted commands
+        // so the Standard preset asks for explicit user approval before
+        // running anything outside permissions.rs's curated allowlist. The
+        // component (apps/desktop/src/components/PermissionPrompt.tsx)
+        // already exists; just needs an event channel from the backend
+        // when is_allowed_command would otherwise reject.
         const result = await invoke<CommandResult>("tool_run_command", {
           cmd: args.cmd,
           args: (args.args as unknown[] | undefined) ?? [],

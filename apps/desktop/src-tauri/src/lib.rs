@@ -141,6 +141,30 @@ fn system_memory_bytes() -> Result<u64, String> {
 pub struct AdapterFile {
     name: String,
     url: String,
+    #[serde(default)]
+    sha256: Option<String>,
+}
+
+/// Reject anything that would let `slug` or `file.name` escape the
+/// adapters root. Mirrors the workspace::resolve_path discipline:
+/// stricter validation on the input, then a starts_with assertion on the
+/// joined path so symlink-swap during download still can't escape.
+fn validate_adapter_path(slug: &str, file_name: &str) -> Result<(), String> {
+    static SLUG_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let slug_re = SLUG_RE
+        .get_or_init(|| regex::Regex::new(r"^[a-z0-9][a-z0-9_-]{0,63}$").unwrap());
+    if !slug_re.is_match(slug) {
+        return Err(format!("invalid adapter slug: {slug}"));
+    }
+    if file_name.is_empty()
+        || file_name.contains('/')
+        || file_name.contains('\\')
+        || file_name.starts_with('.')
+        || file_name.contains("..")
+    {
+        return Err(format!("invalid adapter file name: {file_name}"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -166,6 +190,17 @@ async fn download_adapter(
     files: Vec<AdapterFile>,
     on_event: Channel<DownloadEvent>,
 ) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    // Validate slug + every file name BEFORE creating directories or
+    // touching the network. A malicious storefront row with `slug =
+    // "../../Library/LaunchAgents"` or `file.name = "evil.plist"` is
+    // rejected here; the `starts_with` check on `dest` below is a
+    // belt-and-suspenders guard against symlink-swap.
+    for file in &files {
+        validate_adapter_path(&slug, &file.name)?;
+    }
+
     let dir = PathBuf::from(app_adapters_dir(app.clone())?).join(&slug);
     tokio::fs::create_dir_all(&dir)
         .await
@@ -174,6 +209,9 @@ async fn download_adapter(
     let client = reqwest::Client::new();
     for file in &files {
         let dest = dir.join(&file.name);
+        if !dest.starts_with(&dir) {
+            return Err(format!("path escape detected for {}", file.name));
+        }
         tracing::info!(slug, file = %file.name, "downloading {}", file.url);
         let resp = client
             .get(&file.url)
@@ -195,9 +233,11 @@ async fn download_adapter(
         let mut writer = tokio::fs::File::create(&dest)
             .await
             .map_err(|e| e.to_string())?;
+        let mut hasher = Sha256::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| e.to_string())?;
             bytes_seen += chunk.len() as u64;
+            hasher.update(&chunk);
             writer.write_all(&chunk).await.map_err(|e| e.to_string())?;
             let _ = on_event.send(DownloadEvent::File {
                 name: file.name.clone(),
@@ -206,6 +246,32 @@ async fn download_adapter(
             });
         }
         writer.flush().await.map_err(|e| e.to_string())?;
+        drop(writer);
+
+        // Integrity gate. The storefront schema (adapter_versions.weights_sha256)
+        // already carries the expected digest; if the worker emits it, we
+        // fail-closed on mismatch. If it's absent (legacy worker), warn via
+        // the event channel and continue — flip to fail-closed once every
+        // adapter row carries a SHA.
+        if let Some(expected) = &file.sha256 {
+            let actual = format!("{:x}", hasher.finalize());
+            if !actual.eq_ignore_ascii_case(expected) {
+                let _ = tokio::fs::remove_file(&dest).await;
+                let msg = format!(
+                    "integrity check failed for {}: expected {}, got {}",
+                    file.name, expected, actual
+                );
+                let _ = on_event.send(DownloadEvent::Error { message: msg.clone() });
+                return Err(msg);
+            }
+        } else {
+            let _ = on_event.send(DownloadEvent::Error {
+                message: format!(
+                    "warning: storefront did not provide sha256 for {}; integrity not verified",
+                    file.name
+                ),
+            });
+        }
     }
     let path = dir.to_string_lossy().into_owned();
     let _ = on_event.send(DownloadEvent::Done { path: path.clone() });

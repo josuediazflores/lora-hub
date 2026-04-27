@@ -7,6 +7,12 @@
 -- format via scripts/convert_peft_adapter.py. Files live in R2 under
 -- gemma-3-4b-it-4bit/<slug>/<version>/{adapters.safetensors, adapter_config.json}.
 -- Upload via scripts/upload_adapter_to_r2.sh.
+--
+-- NOTE: The `author` column reflects upstream HuggingFace handles (ZySec-AI,
+-- vamcrizer, mshojaei77, Aledec, safibaig03) of the adapters being
+-- redistributed under their declared licenses. These are not endorsed
+-- contributors. Verify each upstream HF page's license permits redistribution
+-- before seeding production.
 
 INSERT INTO bases (base_id, name, family, parameters, quant, base_sha, hf_repo, size_bytes, license, description) VALUES
   ('gemma-3-4b-it-4bit', 'Gemma 3 4B Instruct (4-bit)', 'gemma', '4B', '4bit',

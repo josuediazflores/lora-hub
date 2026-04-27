@@ -247,6 +247,17 @@ pub fn memory_tool_save(
         source,
     };
     let result = (|| -> Result<Memory, String> {
+        // Honor the read_only preset for tool-driven writes. The frontend
+        // memoryWritePolicy gate is independent — this is the backend
+        // belt-and-suspenders so a prompt-injected page can't poison
+        // memory cross-session even when the user has hardened their
+        // permission preset.
+        let preset_enum = *app
+            .state::<crate::permissions::PresetState>()
+            .0
+            .lock()
+            .unwrap();
+        crate::permissions::is_allowed_write(preset_enum)?;
         validate_input(&input, true)?;
         let mut memories = load(&data_dir);
         let saved = upsert_in(&mut memories, input)?;
