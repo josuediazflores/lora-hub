@@ -52,7 +52,7 @@ export type Settings = {
 export const DEFAULT_SETTINGS: Settings = {
   temperature: 0.7,
   topP: 0.95,
-  maxTokens: 512,
+  maxTokens: 7168,
   theme: "system",
   autoLoadLastBase: false,
   showThinkingInline: false,

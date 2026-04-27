@@ -1,6 +1,7 @@
 mod attachments;
 mod audit;
 mod cache;
+mod db;
 mod mcp;
 mod memory;
 mod permissions;
@@ -8,14 +9,16 @@ mod sidecar;
 mod tools;
 mod workspace;
 
+use db::Database;
 use futures_util::StreamExt;
 use permissions::{Preset, PresetState};
 use serde::{Deserialize, Serialize};
 use sidecar::Sidecar;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 use tokio::io::AsyncWriteExt;
 use workspace::{Workspace, WorkspaceState};
 
@@ -209,6 +212,227 @@ async fn download_adapter(
     Ok(path)
 }
 
+/* ================================================================
+ * SQLite-backed chat + key/value commands (PR2 scaffolding).
+ *
+ * The frontend doesn't call these yet — PR3 will swap localStorage for
+ * these commands. They're wired into the invoke_handler below so the
+ * Tauri IPC bindings exist as soon as the backend ships.
+ * ================================================================ */
+
+#[derive(Debug, Serialize)]
+struct ChatSummary {
+    id: String,
+    title: String,
+    pinned: bool,
+    updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MessageRow {
+    id: String,
+    role: String,
+    payload_json: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provenance_json: Option<serde_json::Value>,
+    position: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatFull {
+    id: String,
+    title: String,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    messages: Vec<MessageRow>,
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[tauri::command]
+fn chat_list(db: State<'_, Database>) -> Result<Vec<ChatSummary>, String> {
+    let conn = db.pool.get().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, pinned, updated_at FROM chats ORDER BY updated_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ChatSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                pinned: row.get::<_, i64>(2)? != 0,
+                updated_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn chat_load(db: State<'_, Database>, id: String) -> Result<ChatFull, String> {
+    let conn = db.pool.get().map_err(|e| e.to_string())?;
+    let (title, pinned) = conn
+        .query_row(
+            "SELECT title, pinned FROM chats WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => format!("no chat with id {id}"),
+            other => other.to_string(),
+        })?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, role, payload_json, provenance_json, position \
+             FROM messages WHERE chat_id = ?1 ORDER BY position ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&id], |row| {
+            let payload_str: String = row.get(2)?;
+            let provenance_str: Option<String> = row.get(3)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                payload_str,
+                provenance_str,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut messages = Vec::new();
+    for r in rows {
+        let (mid, role, payload_str, prov_str, position) = r.map_err(|e| e.to_string())?;
+        let payload_json: serde_json::Value =
+            serde_json::from_str(&payload_str).map_err(|e| e.to_string())?;
+        let provenance_json = match prov_str {
+            Some(s) => Some(serde_json::from_str(&s).map_err(|e| e.to_string())?),
+            None => None,
+        };
+        messages.push(MessageRow {
+            id: mid,
+            role,
+            payload_json,
+            provenance_json,
+            position,
+        });
+    }
+    Ok(ChatFull {
+        id,
+        title,
+        pinned,
+        messages,
+    })
+}
+
+#[tauri::command]
+fn chat_upsert(db: State<'_, Database>, chat: ChatFull) -> Result<(), String> {
+    let mut conn = db.pool.get().map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    let now = unix_now();
+    // Preserve the original created_at on update; otherwise stamp it now.
+    let existing_created_at: Option<i64> = tx
+        .query_row(
+            "SELECT created_at FROM chats WHERE id = ?1",
+            [&chat.id],
+            |row| row.get(0),
+        )
+        .ok();
+    let created_at = existing_created_at.unwrap_or(now);
+
+    tx.execute(
+        "INSERT OR REPLACE INTO chats (id, title, pinned, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            chat.id,
+            chat.title,
+            chat.pinned as i64,
+            created_at,
+            now,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.execute("DELETE FROM messages WHERE chat_id = ?1", [&chat.id])
+        .map_err(|e| e.to_string())?;
+
+    {
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO messages \
+                 (id, chat_id, position, role, payload_json, provenance_json, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .map_err(|e| e.to_string())?;
+        for (idx, m) in chat.messages.iter().enumerate() {
+            // Trust the caller's `position` if set, else fall back to insert order.
+            let position = if m.position != 0 { m.position } else { idx as i64 };
+            let payload_str = serde_json::to_string(&m.payload_json).map_err(|e| e.to_string())?;
+            let provenance_str = match &m.provenance_json {
+                Some(v) => Some(serde_json::to_string(v).map_err(|e| e.to_string())?),
+                None => None,
+            };
+            stmt.execute(rusqlite::params![
+                m.id,
+                chat.id,
+                position,
+                m.role,
+                payload_str,
+                provenance_str,
+                now,
+            ])
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn chat_delete(db: State<'_, Database>, id: String) -> Result<(), String> {
+    let conn = db.pool.get().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM chats WHERE id = ?1", [&id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn kv_get(db: State<'_, Database>, key: String) -> Result<Option<String>, String> {
+    let conn = db.pool.get().map_err(|e| e.to_string())?;
+    let result = conn
+        .query_row("SELECT value FROM kv WHERE key = ?1", [&key], |row| {
+            row.get::<_, String>(0)
+        })
+        .ok();
+    Ok(result)
+}
+
+#[tauri::command]
+fn kv_set(db: State<'_, Database>, key: String, value: String) -> Result<(), String> {
+    let conn = db.pool.get().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
+        rusqlite::params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -236,6 +460,17 @@ pub fn run() {
             handle.manage(WorkspaceState::new(ws));
             handle.manage(PresetState::new(preset));
             handle.manage(Arc::new(mcp::FliMcpState::new()));
+
+            // Open (or create) the SQLite store next to audit.log. Failure
+            // here is logged but non-fatal so the rest of the app can still
+            // boot — chat persistence simply won't be available until the
+            // user fixes the underlying I/O issue.
+            match db::open(&data_dir) {
+                Ok(database) => {
+                    handle.manage(database);
+                }
+                Err(e) => tracing::error!(error = %e, "failed to open lorahub.db"),
+            }
 
             tauri::async_runtime::block_on(async move {
                 match Sidecar::spawn(&handle).await {
@@ -277,6 +512,12 @@ pub fn run() {
             cache::list_cached_hf_models,
             cache::delete_cached_hf_model,
             mcp::mcp_fli_call,
+            chat_list,
+            chat_load,
+            chat_upsert,
+            chat_delete,
+            kv_get,
+            kv_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

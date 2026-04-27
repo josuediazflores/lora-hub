@@ -144,7 +144,7 @@ export function generate(
       op: "generate",
       prompt,
       adapter: opts.adapter ?? null,
-      max_tokens: opts.maxTokens ?? 512,
+      max_tokens: opts.maxTokens ?? 7168,
       temperature: opts.temperature ?? 0.7,
       top_p: opts.topP ?? 0.95,
       messages: opts.messages ?? null,

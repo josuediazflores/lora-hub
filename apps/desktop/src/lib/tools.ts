@@ -141,7 +141,11 @@ export const TOOL_DEFS: ToolDef[] = [
       "If the user gives a city name instead of an airport code (e.g. 'London'), pick the primary IATA " +
       "code ('LHR' for London, 'JFK' for New York, 'LAX' for Los Angeles, etc.) and proceed — do not " +
       "ask for clarification. For one-way, omit return_date. For round-trip with a duration like " +
-      "'week-long', set return_date = departure_date + duration.",
+      "'week-long', set return_date = departure_date + duration. " +
+      "If the user omits details (no origin, no destination, no date), DO NOT ask for clarification — " +
+      "fill in plausible defaults (origin 'SJC' unless memory overrides; a popular destination matching " +
+      "the user's vibe; a departure ~30 days from today) and state your assumptions in one short " +
+      "sentence alongside the call so the user can correct them.",
     parameters: {
       origin: {
         type: "string",
@@ -198,7 +202,13 @@ export const TOOL_DEFS: ToolDef[] = [
       "'best time to fly to Paris this summer'). Returns a list of date candidates ranked by price. " +
       "Convert relative phrases ('this summer', 'next month') to concrete start_date / end_date in " +
       "YYYY-MM-DD yourself. Pick a primary IATA airport code if the user gives a city name — do not " +
-      "ask for clarification.",
+      "ask for clarification. " +
+      "If the request is vague (no origin, no destination, no dates), DO NOT ask for clarification — " +
+      "propose a plausible plan and call the tool anyway. Defaults: origin 'SJC' unless memory says " +
+      "otherwise; destination is a popular airport matching the user's vibe (e.g. NRT Japan, CDG Paris, " +
+      "LHR London, LAX LA, MEX Mexico City, CUN Cancún); date range spans ~30 days starting 30 days " +
+      "from today; trip_duration 7; is_round_trip true. State your assumptions in one short sentence " +
+      "alongside the call so the user can correct them.",
     parameters: {
       origin: {
         type: "string",
@@ -377,6 +387,47 @@ export const TOOL_DEFS: ToolDef[] = [
         type: "string",
         required: true,
         description: "Self-contained prompt for the specialist (includes any context it needs).",
+      },
+    },
+  },
+  {
+    name: "list_adapters",
+    description:
+      "List LoRA adapters installed on this machine, with which one (if any) is currently active. " +
+      "Use this BEFORE calling activate_adapter if you're unsure which slug to use, or to show the " +
+      "user what's available. Returns a JSON array of {slug, active}. Cheap — no network, no extra " +
+      "model call.",
+    parameters: {},
+  },
+  {
+    name: "activate_adapter",
+    description:
+      "Attach a LoRA adapter by slug so your NEXT reply in this same turn is generated through it — " +
+      "no second user message needed. Enforces one-at-a-time: activating replaces any currently-active " +
+      "adapter. Use only when the user explicitly asks for a different specialist/style, or when you " +
+      "genuinely need a different capability (e.g. a code specialist for a code question). Don't swap " +
+      "speculatively. If the slug isn't installed, call list_adapters first and pick from the results.",
+    parameters: {
+      slug: {
+        type: "string",
+        required: true,
+        description: "Exact adapter slug, e.g. 'opus-reasoning-e4b'. Case-sensitive.",
+      },
+    },
+  },
+  {
+    name: "deactivate_adapter",
+    description:
+      "Detach the currently-active adapter and run as pure base on subsequent replies (until the user " +
+      "or you re-activate one). Use when the current adapter is the wrong fit, or when the user asks " +
+      "to go back to the base model. No-op if no adapter is active.",
+    parameters: {
+      unload: {
+        type: "boolean",
+        required: false,
+        description:
+          "If true, also evict the adapter from the sidecar cache (frees memory; re-activation will " +
+          "be slower). Defaults to false — cached, fast to reattach.",
       },
     },
   },
@@ -649,6 +700,17 @@ export async function runTool(
           error:
             "use_specialist must be handled by the specialist turn runner, not runTool.",
         };
+      case "list_adapters":
+      case "activate_adapter":
+      case "deactivate_adapter":
+        // Intentional: these need status / setStatus / downloadedAdapters /
+        // ensureAdapterAttached, plus they must mutate the turn runner's
+        // local `currentAdapter` so the next step picks up the new adapter.
+        // Handled inside runNormalTurn; reaching this branch = a config bug.
+        return {
+          status: "error",
+          error: `${name} must be handled by the calling turn runner, not runTool.`,
+        };
       default:
         return { status: "error", error: `unknown tool: ${name}` };
     }
@@ -685,6 +747,7 @@ type FliDecoded = {
   success?: boolean;
   error?: string;
   flights?: FliFlight[];
+  dates?: FliDatePrice[];
   date_prices?: FliDatePrice[];
 };
 
@@ -706,9 +769,12 @@ type FliLeg = {
 };
 
 type FliDatePrice = {
-  date?: string;
+  // fli returns `date` as a tuple — `[dep]` for one-way, `[dep, ret]` for
+  // round-trip — which JSON-serializes to an array of ISO strings. Older/
+  // alternative builds may return a plain string. Accept both.
+  date?: string | string[];
   departure_date?: string;
-  return_date?: string;
+  return_date?: string | null;
   price?: number;
   price_usd?: number;
   currency?: string;
@@ -734,11 +800,13 @@ function buildFliDatesArgs(args: Record<string, unknown>): Record<string, unknow
   const out: Record<string, unknown> = {
     origin: String(args.origin ?? "").toUpperCase(),
     destination: String(args.destination ?? "").toUpperCase(),
-    from_date: args.start_date,
-    to_date: args.end_date,
+    start_date: args.start_date,
+    end_date: args.end_date,
   };
+  if (args.trip_duration != null) out.trip_duration = args.trip_duration;
+  if (args.is_round_trip != null) out.is_round_trip = args.is_round_trip;
   if (args.cabin_class) out.cabin_class = args.cabin_class;
-  if (args.trip_duration) out.duration = args.trip_duration;
+  if (args.passengers != null) out.passengers = args.passengers;
   return out;
 }
 
@@ -814,7 +882,7 @@ function adaptFliDates(
 ): DateResultShape[] {
   const decoded = decodeFli(result);
   if (decoded.error) throw new Error(decoded.error);
-  const raw = decoded.date_prices ?? [];
+  const raw = decoded.dates ?? decoded.date_prices ?? [];
   const origin = String(args.origin ?? "").toUpperCase();
   const destination = String(args.destination ?? "").toUpperCase();
   const tripDuration =
@@ -822,11 +890,23 @@ function adaptFliDates(
 
   const out: DateResultShape[] = [];
   for (const entry of raw) {
-    const dep = entry.departure_date ?? entry.date;
+    // `entry.date` is fli's raw tuple-turned-array: [dep] for one-way,
+    // [dep, ret] for round-trip. Fall through to the flat fields for
+    // older/alternative builds that use `departure_date` / `return_date`.
+    const tupleDep = Array.isArray(entry.date) ? entry.date[0] : undefined;
+    const tupleRet =
+      Array.isArray(entry.date) && entry.date.length > 1 ? entry.date[1] : undefined;
+    const depRaw =
+      entry.departure_date ??
+      tupleDep ??
+      (typeof entry.date === "string" ? entry.date : undefined);
+    const dep = toIsoDate(depRaw);
     if (!dep) continue;
-    let ret = entry.return_date;
+    const retExplicit = toIsoDate(entry.return_date ?? tupleRet);
+    let ret = retExplicit;
     if (!ret) {
       const retDate = new Date(dep);
+      if (Number.isNaN(retDate.getTime())) continue;
       retDate.setDate(retDate.getDate() + tripDuration);
       ret = retDate.toISOString().slice(0, 10);
     }
@@ -839,6 +919,20 @@ function adaptFliDates(
     });
   }
   return out;
+}
+
+/** Coerce fli's datetime-ish strings to a YYYY-MM-DD date. Returns null on failure. */
+function toIsoDate(v: unknown): string | null {
+  if (v == null) return null;
+  if (typeof v !== "string") return null;
+  // Fast path: already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  // "2026-05-04T00:00:00" or similar — strip the time.
+  const slice = v.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(slice)) return slice;
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
 }
 
 function sliceOutboundLegs(legs: FliLeg[], destination: string): FliLeg[] {
