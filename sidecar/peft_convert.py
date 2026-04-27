@@ -6,6 +6,11 @@ The sidecar uses this to auto-convert any HF PEFT adapter (`adapter_model.safete
 
 Detection: PEFT configs declare `"peft_type": "LORA"`. mlx-lm configs declare
 `"fine_tune_type": "lora"` and a `lora_parameters` block.
+
+PEFT key parsing and the rank/alpha scaling conventions follow huggingface/peft
+(https://github.com/huggingface/peft, Apache-2.0). The mlx-lm-shaped output
+matches the conventions of ml-explore/mlx-examples
+(https://github.com/ml-explore/mlx-examples, MIT).
 """
 
 from __future__ import annotations

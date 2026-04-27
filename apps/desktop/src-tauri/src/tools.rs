@@ -526,6 +526,7 @@ async fn http_fetch_inner(
     body: Option<String>,
 ) -> Result<HttpResponse, String> {
     is_allowed_http(method, preset)?;
+    crate::permissions::is_allowed_url(url).await?;
 
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -880,11 +881,7 @@ pub async fn tool_fetch_page(
 
 async fn fetch_page_inner(preset: Preset, url: &str) -> Result<FetchPageResult, String> {
     is_allowed_http("GET", preset)?;
-
-    let parsed = url::Url::parse(url).map_err(|e| format!("fetch_page: bad url ({e})"))?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err("fetch_page: only http(s) URLs are allowed".to_string());
-    }
+    crate::permissions::is_allowed_url(url).await?;
 
     // Sites behind Cloudflare / aggressive WAFs (AccuWeather, StackOverflow
     // edges, any newspaper paywall) reject a blank / bot-shaped UA outright

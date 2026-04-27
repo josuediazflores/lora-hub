@@ -15,8 +15,7 @@ node_modules/
 dist/
 build/
 *.log
-.env
-.env.local
+.env*
 
 # Python (if used for MLX bridge)
 __pycache__/

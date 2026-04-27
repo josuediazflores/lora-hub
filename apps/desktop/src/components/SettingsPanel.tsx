@@ -41,8 +41,8 @@ export type Settings = {
    * they're safe to allow by default. */
   webToolsInNormalChat: boolean;
   /** Which backend powers the web_search tool. DuckDuckGo is zero-setup
-   * (scrapes the HTML endpoint). Brave requires an API key but is more
-   * reliable. */
+   * (uses DuckDuckGo's lite HTML endpoint). Brave requires an API key but
+   * is more reliable. */
   searchProvider: SearchProvider;
   /** Brave Search API key — used only when searchProvider === "brave".
    * Stored in localStorage at rest; sent only to Brave. */
@@ -52,7 +52,7 @@ export type Settings = {
 export const DEFAULT_SETTINGS: Settings = {
   temperature: 0.7,
   topP: 0.95,
-  maxTokens: 512,
+  maxTokens: 7168,
   theme: "system",
   autoLoadLastBase: false,
   showThinkingInline: false,
@@ -253,7 +253,7 @@ export function SettingsPage({ settings, onChange, onBack, memories, onSaveMemor
               </div>
               <div className="mt-1 text-[12px] leading-[1.45] text-app-text-faint">
                 {settings.searchProvider === "duckduckgo" ? (
-                  <>Zero setup — scrapes the DuckDuckGo HTML endpoint. Fragile if DDG changes their layout; swap to Brave for reliability.</>
+                  <>Zero setup — uses DuckDuckGo's lite HTML endpoint. Brittle to layout changes; swap to Brave for reliability.</>
                 ) : (
                   <>Brave Search API. 2000 free queries/month, then $3/mo for 20k. Key stays on this device.</>
                 )}

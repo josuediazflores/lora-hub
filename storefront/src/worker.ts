@@ -53,7 +53,22 @@ type VersionRow = {
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.use("*", cors({ origin: "*", allowHeaders: ["Content-Type"] }));
+// Reads (catalog browse, adapter detail, etc.) are wide-open — that's the
+// point of a public storefront. The download-counter POST is scoped to the
+// Tauri webview origins so a random page can't inflate counts at scale.
+app.use(
+  "/adapters/*/installed",
+  cors({
+    origin: [
+      "http://localhost:1420",
+      "tauri://localhost",
+      "https://tauri.localhost",
+    ],
+    allowMethods: ["POST"],
+    allowHeaders: ["Content-Type"],
+  }),
+);
+app.use("*", cors({ origin: "*", allowHeaders: ["Content-Type"], allowMethods: ["GET"] }));
 
 app.get("/", (c) =>
   c.json({ name: "lora-hub-storefront", version: "0.1.0" }),

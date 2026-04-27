@@ -371,6 +371,11 @@ def _lora_save_and_zero() -> None:
     """Save the currently-loaded LoRA weights and replace them with zeros
     so the model behaves like un-adapted base for one generation. No-op if
     the model isn't LoRA-wrapped or we've already saved.
+
+    Only lora_a / lora_b tensors are touched. `model.trainable_parameters()`
+    on a LoRA-wrapped model includes unquantized base tensors (layer norms,
+    embeddings, etc.) because linear_to_lora_layers does not freeze the base;
+    zeroing those would corrupt the model and produce token salad.
     """
     import mlx.core as mx
     from mlx.utils import tree_flatten
@@ -378,8 +383,15 @@ def _lora_save_and_zero() -> None:
     if not STATE.lora_wrapped or STATE.saved_lora is not None:
         return
     trainable = dict(tree_flatten(STATE.model.trainable_parameters()))
-    STATE.saved_lora = {k: v for k, v in trainable.items()}
-    zeros = [(k, mx.zeros(v.shape, dtype=v.dtype)) for k, v in trainable.items()]
+    lora_only = {
+        k: v
+        for k, v in trainable.items()
+        if k.endswith(".lora_a") or k.endswith(".lora_b")
+    }
+    if not lora_only:
+        return
+    STATE.saved_lora = lora_only
+    zeros = [(k, mx.zeros(v.shape, dtype=v.dtype)) for k, v in lora_only.items()]
     STATE.model.load_weights(zeros, strict=False)
     mx.eval(STATE.model.parameters())
 
@@ -497,6 +509,8 @@ def _parse_gemma4_body(body: str) -> dict:
     The body between `<|tool_call>` and `<tool_call|>` contains one or more
     `call:name{args}` fragments. We return the first one. Args use unquoted
     keys and `<|"|>`-delimited strings; we reuse mlx_lm's parser.
+    Tool-call extraction reuses ml-explore/mlx-examples (MIT) — see
+    `mlx_lm.tool_parsers.gemma4`.
     """
     from mlx_lm.tool_parsers.gemma4 import parse_tool_call  # type: ignore
 

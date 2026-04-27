@@ -6,6 +6,10 @@ compatibility_date = "2026-04-01"
 binding = "DB"
 database_name = "lora-hub-storefront"
 # Populate database_id after running `wrangler d1 create lora-hub-storefront`.
+# Note: a real D1 ID identifies your Cloudflare account graph publicly; if
+# this repo is open-sourced, prefer `wrangler secret put D1_DATABASE_ID`
+# and reference it via [[env.production.d1_databases]] in a non-tracked
+# wrangler.<env>.toml rather than committing the literal UUID.
 database_id = "REPLACE_WITH_D1_ID"
 
 [[r2_buckets]]

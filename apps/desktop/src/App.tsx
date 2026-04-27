@@ -1,18 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { BookOpen, RefreshCw, Square } from "lucide-react";
-import { Markdown } from "./components/Markdown";
-import {
-  SettingsPage,
-  loadSettings,
-  saveSettings,
-  type Settings,
-} from "./components/SettingsPanel";
+import { SettingsPage, type Settings } from "./components/SettingsPanel";
 import { Sidebar, type Conversation, type SidebarView } from "./components/Sidebar";
-import { AttachmentCard } from "./components/AttachmentCard";
-import { Composer } from "./components/Composer";
-import { QuickChips, defaultChips } from "./components/QuickChips";
+import { defaultChips } from "./components/QuickChips";
 import { StoreLanding } from "./components/StoreLanding";
 import { StoreBrowse } from "./components/StoreBrowse";
 import { AdapterSpecSheet } from "./components/AdapterSpecSheet";
@@ -20,37 +11,38 @@ import type { UseCase } from "./lib/editorial-data";
 import { ModelsView } from "./components/ModelsView";
 import { AdaptersView } from "./components/AdaptersView";
 import { ConfirmModal } from "./components/ConfirmModal";
-import { Gemma4Tile } from "./components/Gemma4Tile";
-import { FeaturedAdapters } from "./components/FeaturedAdapters";
 import { ActiveAdapterStrip } from "./components/ActiveAdapterStrip";
-import { WorkspaceFooter } from "./components/WorkspaceFooter";
-import { ToolCallBubble, type ToolCallMessage } from "./components/ToolCallBubble";
+import { type SpecialistPlanStep } from "./components/SpecialistPlanBubble";
+import { type ABPick } from "./components/ABComparePane";
 import {
-  SpecialistStepBubble,
+  type Message,
+  type ComparisonMessage,
+  type MemoryChipMessage,
+  type AdapterEntryMerged,
+  type Status,
+  type Chat,
+  type ToolCallMessage,
   type SpecialistStepMessage,
-} from "./components/SpecialistStepBubble";
-import {
-  SpecialistPlanBubble,
   type SpecialistPlanMessage,
-  type SpecialistPlanStep,
-} from "./components/SpecialistPlanBubble";
-import {
-  ABComparePane,
   type ABComparisonMessage,
-  type ABPick,
-} from "./components/ABComparePane";
+} from "./lib/message-types";
+import { buildSystemMessage } from "./lib/system-prompt";
+import { LAST_BASE_KEY } from "./lib/persistence";
+import { useChatStore } from "./lib/chat-store";
+import {
+  buildHistory,
+  estimateTokens,
+  estimateMessageTokens,
+  findPlannerAdapter,
+  contextLimitFor,
+} from "./lib/chat-helpers";
 import { AB_DELTAS, selectNextDelta, type ABDelta } from "./lib/ab-deltas";
 import type { ChatMode } from "./components/ModeChip";
-import { TurnRow, SwapMarker, GutterBtn } from "./components/TurnRow";
-import { ThoughtDisclosure } from "./components/ThoughtDisclosure";
-import { parseThinking } from "./lib/thinking";
-import { adapterAccent } from "./lib/adapter-accent";
 import { applyTheme, watchSystemTheme } from "./lib/theme";
 import {
   listMemories,
   saveMemory,
   deleteMemory,
-  type Memory,
   type MemoryInput,
 } from "./lib/memory";
 import {
@@ -78,803 +70,48 @@ import * as store from "./lib/store";
 import { listCachedHfModels } from "./lib/cache";
 import { TOOL_DEFS, runTool } from "./lib/tools";
 import type { StoreAdapter, StoreBase } from "./lib/store";
-
-const USER_NAME = "Josue Diaz Flores";
-
-// Every mlx-community Gemma 4 instruct variant across the four sizes
-// (E2B, E4B, 26B-A4B, 31B) and every quant mlx-community publishes:
-// 4bit, 5bit, 6bit, 8bit, mxfp4, mxfp8, bf16. nvfp4 is intentionally
-// skipped — it's an NVIDIA FP4 format and can't run on MLX/Apple
-// Silicon. Ordered by family size first, then by quant (smallest →
-// largest). `base_sha` is the content fingerprint computed by the
-// sidecar on first load; we leave it empty here and let the sidecar
-// fill it in on load — only adapter-compatibility checks consult it,
-// and they compare against the adapter's declared sha, not this list.
-const FALLBACK_BASES: StoreBase[] = [
-  // ── E2B (~2B effective) ──────────────────────────────────────────
-  {
-    base_id: "gemma-4-e2b-it-4bit",
-    name: "Gemma 4 E2B Instruct (4-bit)",
-    family: "gemma",
-    parameters: "E2B",
-    quant: "4bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e2b-it-4bit",
-    size_bytes: 3_610_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e2b-it-5bit",
-    name: "Gemma 4 E2B Instruct (5-bit)",
-    family: "gemma",
-    parameters: "E2B",
-    quant: "5bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e2b-it-5bit",
-    size_bytes: 4_190_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e2b-it-mxfp4",
-    name: "Gemma 4 E2B Instruct (mxfp4)",
-    family: "gemma",
-    parameters: "E2B",
-    quant: "mxfp4",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e2b-it-mxfp4",
-    size_bytes: 4_300_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e2b-it-6bit",
-    name: "Gemma 4 E2B Instruct (6-bit)",
-    family: "gemma",
-    parameters: "E2B",
-    quant: "6bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e2b-it-6bit",
-    size_bytes: 4_770_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e2b-it-mxfp8",
-    name: "Gemma 4 E2B Instruct (mxfp8)",
-    family: "gemma",
-    parameters: "E2B",
-    quant: "mxfp8",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e2b-it-mxfp8",
-    size_bytes: 5_790_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e2b-it-8bit",
-    name: "Gemma 4 E2B Instruct (8-bit)",
-    family: "gemma",
-    parameters: "E2B",
-    quant: "8bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e2b-it-8bit",
-    size_bytes: 5_930_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e2b-it-bf16",
-    name: "Gemma 4 E2B Instruct (bf16)",
-    family: "gemma",
-    parameters: "E2B",
-    quant: "bf16",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e2b-it-bf16",
-    size_bytes: 10_280_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  // ── E4B (~4B effective) ──────────────────────────────────────────
-  {
-    base_id: "gemma-4-e4b-it-4bit",
-    name: "Gemma 4 E4B Instruct (4-bit)",
-    family: "gemma",
-    parameters: "E4B",
-    quant: "4bit",
-    base_sha: "769bec7273285355f6ba44a974df0e223fa7db7e3267e86b3e032ff006f792bc",
-    hf_repo: "mlx-community/gemma-4-e4b-it-4bit",
-    size_bytes: 5_250_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e4b-it-5bit",
-    name: "Gemma 4 E4B Instruct (5-bit)",
-    family: "gemma",
-    parameters: "E4B",
-    quant: "5bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e4b-it-5bit",
-    size_bytes: 6_190_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e4b-it-mxfp4",
-    name: "Gemma 4 E4B Instruct (mxfp4)",
-    family: "gemma",
-    parameters: "E4B",
-    quant: "mxfp4",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e4b-it-mxfp4",
-    size_bytes: 6_770_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e4b-it-6bit",
-    name: "Gemma 4 E4B Instruct (6-bit)",
-    family: "gemma",
-    parameters: "E4B",
-    quant: "6bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e4b-it-6bit",
-    size_bytes: 7_120_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e4b-it-mxfp8",
-    name: "Gemma 4 E4B Instruct (mxfp8)",
-    family: "gemma",
-    parameters: "E4B",
-    quant: "mxfp8",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e4b-it-mxfp8",
-    size_bytes: 8_760_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e4b-it-8bit",
-    name: "Gemma 4 E4B Instruct (8-bit)",
-    family: "gemma",
-    parameters: "E4B",
-    quant: "8bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e4b-it-8bit",
-    size_bytes: 9_000_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-e4b-it-bf16",
-    name: "Gemma 4 E4B Instruct (bf16)",
-    family: "gemma",
-    parameters: "E4B",
-    quant: "bf16",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-e4b-it-bf16",
-    size_bytes: 16_020_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  // ── 26B-A4B (26B total, ~4B active; MoE) ─────────────────────────
-  {
-    base_id: "gemma-4-26b-a4b-it-mxfp4",
-    name: "Gemma 4 26B-A4B Instruct (mxfp4)",
-    family: "gemma",
-    parameters: "26B-A4B",
-    quant: "mxfp4",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-26b-a4b-it-mxfp4",
-    size_bytes: 29_420_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-26b-a4b-it-8bit",
-    name: "Gemma 4 26B-A4B Instruct (8-bit)",
-    family: "gemma",
-    parameters: "26B-A4B",
-    quant: "8bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-26b-a4b-it-8bit",
-    size_bytes: 27_990_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-26b-a4b-it-4bit",
-    name: "Gemma 4 26B-A4B Instruct (4-bit)",
-    family: "gemma",
-    parameters: "26B-A4B",
-    quant: "4bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-26b-a4b-it-4bit",
-    size_bytes: 30_980_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-26b-a4b-it-5bit",
-    name: "Gemma 4 26B-A4B Instruct (5-bit)",
-    family: "gemma",
-    parameters: "26B-A4B",
-    quant: "5bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-26b-a4b-it-5bit",
-    size_bytes: 37_220_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-26b-a4b-it-6bit",
-    name: "Gemma 4 26B-A4B Instruct (6-bit)",
-    family: "gemma",
-    parameters: "26B-A4B",
-    quant: "6bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-26b-a4b-it-6bit",
-    size_bytes: 43_460_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-26b-a4b-it-bf16",
-    name: "Gemma 4 26B-A4B Instruct (bf16)",
-    family: "gemma",
-    parameters: "26B-A4B",
-    quant: "bf16",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-26b-a4b-it-bf16",
-    size_bytes: 51_640_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-26b-a4b-it-mxfp8",
-    name: "Gemma 4 26B-A4B Instruct (mxfp8)",
-    family: "gemma",
-    parameters: "26B-A4B",
-    quant: "mxfp8",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-26b-a4b-it-mxfp8",
-    size_bytes: 53_860_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  // ── 31B (dense) ──────────────────────────────────────────────────
-  {
-    base_id: "gemma-4-31b-it-mxfp4",
-    name: "Gemma 4 31B Instruct (mxfp4)",
-    family: "gemma",
-    parameters: "31B",
-    quant: "mxfp4",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-31b-it-mxfp4",
-    size_bytes: 17_480_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-31b-it-5bit",
-    name: "Gemma 4 31B Instruct (5-bit)",
-    family: "gemma",
-    parameters: "31B",
-    quant: "5bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-31b-it-5bit",
-    size_bytes: 22_280_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-31b-it-6bit",
-    name: "Gemma 4 31B Instruct (6-bit)",
-    family: "gemma",
-    parameters: "31B",
-    quant: "6bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-31b-it-6bit",
-    size_bytes: 26_120_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-31b-it-mxfp8",
-    name: "Gemma 4 31B Instruct (mxfp8)",
-    family: "gemma",
-    parameters: "31B",
-    quant: "mxfp8",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-31b-it-mxfp8",
-    size_bytes: 32_840_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-31b-it-8bit",
-    name: "Gemma 4 31B Instruct (8-bit)",
-    family: "gemma",
-    parameters: "31B",
-    quant: "8bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-31b-it-8bit",
-    size_bytes: 33_800_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-31b-it-4bit",
-    name: "Gemma 4 31B Instruct (4-bit)",
-    family: "gemma",
-    parameters: "31B",
-    quant: "4bit",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-31b-it-4bit",
-    size_bytes: 36_860_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-  {
-    base_id: "gemma-4-31b-it-bf16",
-    name: "Gemma 4 31B Instruct (bf16)",
-    family: "gemma",
-    parameters: "31B",
-    quant: "bf16",
-    base_sha: "",
-    hf_repo: "mlx-community/gemma-4-31b-it-bf16",
-    size_bytes: 62_580_000_000,
-    license: "Gemma Terms",
-    description: "",
-  },
-];
-
-type Message = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  text: string;
-  /** Files the user attached to this turn. User messages only. Rendered
-   * as cards next to the text bubble; the extracted bodies are folded
-   * into the prompt the model sees via buildHistory, so the stored
-   * `text` stays clean (just what the user typed). */
-  attachments?: Attachment[];
-  adapter?: string | null;
-  pending?: boolean;
-  progress?: { desc: string; percent: number; n: number; total: number } | null;
-};
-
-type ComparisonMessage = {
-  id: string;
-  role: "comparison";
-  prompt: string;
-  adapter: string;
-  baseText: string;
-  adapterText: string;
-  /** Which half is currently streaming, or null once both are done. */
-  pending: "base" | "adapter" | null;
-};
-
-/** Lightweight inline marker rendered when the model uses save_memory
- * during normal chat. Keeps the reading flow uninterrupted — no expandable
- * tool bubble, just a single-line pill that links back to Settings → Memory. */
-type MemoryChipMessage = {
-  id: string;
-  role: "memory_chip";
-  name: string;
-  kind?: string | null;
-  status: "saved" | "denied" | "error";
-  detail?: string;
-};
-
-type AnyMessage =
-  | Message
-  | ComparisonMessage
-  | ToolCallMessage
-  | MemoryChipMessage
-  | SpecialistStepMessage
-  | SpecialistPlanMessage
-  | ABComparisonMessage;
-
-type AdapterEntryMerged = {
-  name: string;
-  path: string;
-  base_sha: string | null;
-  downloaded_only: boolean;
-};
-
-type Status = {
-  base_model_id: string | null;
-  base_sha: string | null;
-  active_adapter: string | null;
-  adapters: { name: string; path: string; base_sha: string | null }[];
-};
-
-type Chat = {
-  id: string;
-  title: string;
-  messages: AnyMessage[];
-  pinned?: boolean;
-};
+import { FALLBACK_BASES } from "./lib/fallback-bases";
+import { ChatView } from "./components/ChatView";
+import { WelcomeScreen } from "./components/WelcomeScreen";
+import { MemoryApprovalModal } from "./components/MemoryApprovalModal";
 
 type View = SidebarView;
 
-const STORAGE_KEY = "lora-hub:chats:v1";
-const ACTIVE_KEY = "lora-hub:active-chat:v1";
-const LAST_BASE_KEY = "lora-hub:last-base-id:v1";
-
-type PersistedChat = { id: string; title: string; messages: AnyMessage[]; pinned?: boolean };
-
-function loadPersistedChats(): { chats: Chat[]; activeId: string } {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { chats: [emptyChat()], activeId: "" };
-    const parsed = JSON.parse(raw) as PersistedChat[];
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-      return { chats: [emptyChat()], activeId: "" };
-    }
-    const chats: Chat[] = parsed.map((c) => ({
-      id: c.id,
-      title: c.title,
-      pinned: !!c.pinned,
-      messages: (c.messages ?? []).map((m) => cleanOnLoad(m)),
-    }));
-    const activeId = localStorage.getItem(ACTIVE_KEY) ?? chats[0].id;
-    return { chats, activeId: chats.some((c) => c.id === activeId) ? activeId : chats[0].id };
-  } catch {
-    return { chats: [emptyChat()], activeId: "" };
-  }
-}
-
-function persistChats(chats: Chat[]): void {
-  try {
-    const cleaned: PersistedChat[] = chats.map((c) => ({
-      id: c.id,
-      title: c.title,
-      pinned: c.pinned,
-      messages: c.messages.map((m) => cleanOnLoad(m)),
-    }));
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
-  } catch {
-    // ignore quota errors etc.
-  }
-}
-
-/** Strip transient fields on (re)load/persist without clobbering the
- * discriminated-union shape for comparison / tool_call messages. */
-function cleanOnLoad(m: AnyMessage): AnyMessage {
-  if (m.role === "comparison") {
-    return { ...m, pending: null };
-  }
-  if (m.role === "memory_chip") {
-    return m;
-  }
-  if (m.role === "tool_call") {
-    // Trim big outputs on persist so localStorage doesn't balloon.
-    const MAX = 2000;
-    const output =
-      m.output && m.output.length > MAX
-        ? m.output.slice(0, MAX) + "\n…truncated for persistence…"
-        : m.output;
-    // A pending tool call from a prior session is dead — mark it denied so
-    // the transcript makes sense after reload.
-    const status = m.status === "pending" ? "denied" : m.status;
-    return { ...m, output, status };
-  }
-  if (m.role === "specialist_step") {
-    const MAX = 2000;
-    const output =
-      m.output && m.output.length > MAX
-        ? m.output.slice(0, MAX) + "\n…truncated for persistence…"
-        : m.output;
-    if (m.status === "pending") {
-      return { ...m, output, status: "error", error: m.error ?? "session ended" };
-    }
-    return { ...m, output };
-  }
-  if (m.role === "specialist_plan") {
-    // Plan messages don't accumulate stream state — they're fully formed
-    // by the time the first planner step finishes. Safe to persist as-is.
-    return m;
-  }
-  if (m.role === "ab_comparison") {
-    // Trim both lanes on persist. A pending A/B turn from a prior session
-    // is dead — if we never streamed a result in the old process we can't
-    // resurrect it, so just mark the turn as dismissed.
-    const MAX = 2000;
-    const trim = (s: string) =>
-      s.length > MAX ? s.slice(0, MAX) + "\n…truncated for persistence…" : s;
-    const pick: ABPick | null =
-      m.pending !== null && !m.pick ? "dismissed" : m.pick;
-    return {
-      ...m,
-      baselineText: trim(m.baselineText),
-      variationText: trim(m.variationText),
-      pending: null,
-      pick,
-    };
-  }
-  // Drop image `data_url`s from stored attachments — base64'd images are
-  // the real bloat risk for localStorage. The card still renders from
-  // name/kind/size and the extracted text survives for follow-up turns.
-  const attachments = m.attachments?.map((a) => ({ ...a, data_url: undefined }));
-  return { ...m, progress: null, pending: false, attachments };
-}
-
-/** Fold chat history into sidecar-ready turns. Comparison messages collapse
- * to their adapter output. Tool-call messages expand into a synthetic
- * assistant turn carrying the call marker followed by a synthetic user turn
- * carrying the tool result, so the model sees prior tool interactions on any
- * follow-up generate. A non-empty `systemPrompt` is prepended as a single
- * `system` role message; the sidecar routes it through the tokenizer's
- * chat template. */
-function buildHistory(
-  msgs: AnyMessage[],
-  systemPrompt: string = "",
-  memories: Memory[] = [],
-  learnedRules: string[] = [],
-): sidecar.ChatMessage[] {
-  const out: sidecar.ChatMessage[] = [];
-  const sys = buildSystemMessage(systemPrompt, memories, learnedRules);
-  if (sys) out.push({ role: "system", content: sys });
-  for (const m of msgs) {
-    if (m.role === "comparison") {
-      const content = m.adapterText.trim();
-      if (content) out.push({ role: "assistant", content });
-    } else if (m.role === "memory_chip") {
-      // Memory chips are UI-only — the memory itself already lives in the
-      // system message, and the tool exchange is folded into the assistant's
-      // enclosing message. Nothing to emit here.
-      continue;
-    } else if (m.role === "tool_call") {
-      out.push({
-        role: "assistant",
-        content: `<tool_call>${JSON.stringify({
-          name: m.name,
-          args: m.args,
-        })}</tool_call>`,
-      });
-      const resultText =
-        m.status === "success"
-          ? (m.output ?? "")
-          : (m.error ?? `[${m.status}]`);
-      out.push({
-        role: "user",
-        content: `[tool result: ${m.name}${
-          m.status !== "success" ? " " + m.status : ""
-        }]\n${resultText}`,
-      });
-    } else if (m.role === "ab_comparison") {
-      // The user prompt for this turn lives on a separate `user`-role
-      // Message (runABTurn pushes it first), so don't duplicate. Emit
-      // only the picked lane's output as the assistant turn. Default to
-      // baseline if the user never clicked (silence ≠ accept).
-      const pickedText =
-        m.pick === "variation" ? m.variationText : m.baselineText;
-      const assistantContent = pickedText.trim();
-      if (assistantContent)
-        out.push({ role: "assistant", content: assistantContent });
-    } else if (m.role === "specialist_plan") {
-      // UI-only record; the planner's own output already contained the
-      // <plan>…</plan> block inline, so don't re-add it to history.
-      continue;
-    } else if (m.role === "specialist_step") {
-      const slugLabel = m.slug ?? "base";
-      out.push({
-        role: "assistant",
-        content: `<tool_call>${JSON.stringify({
-          name: "use_specialist",
-          args: { slug: m.slug, instruction: m.instruction },
-        })}</tool_call>`,
-      });
-      // Specialist outputs can be verbose. Tail-trim on follow-up turns to
-      // keep the planner's context manageable — the user still sees the
-      // full output in the transcript.
-      const TAIL = 3200;
-      const raw =
-        m.status === "success"
-          ? m.output
-          : m.error ?? m.output ?? `[${m.status}]`;
-      const resultText =
-        raw.length > TAIL ? raw.slice(0, TAIL) + "\n…truncated…" : raw;
-      out.push({
-        role: "user",
-        content: `[tool result: use_specialist ${slugLabel}${
-          m.status !== "success" ? " " + m.status : ""
-        }]\n${resultText}`,
-      });
-    } else if (m.role === "user" || m.role === "assistant") {
-      // Re-assemble the user-visible text with any attachment bodies at
-      // history-build time. Stored `text` stays clean for the transcript;
-      // the model sees the full fenced-block formatting it was trained on.
-      let content = m.text;
-      if (m.role === "user" && m.attachments && m.attachments.length) {
-        content = content + formatAttachmentsForPrompt(m.attachments);
-      }
-      content = content.trim();
-      if (content) out.push({ role: m.role, content });
-    }
-  }
-  return out;
-}
-
-/** Combines the user's static system prompt with a bulleted block of stored
- * memories. Memories are dropped from the tail until the combined message is
- * under the budget; individual memories are never silently truncated. */
-const MEMORY_SYSTEM_BUDGET = 4_000;
-
-/** Back-of-envelope token count. Proper tokenizers live in the sidecar,
- * but pinging it on every keystroke is wasteful. For a context-usage
- * chip, ~3.8 chars/token (English+code mix) is within ~10% of the
- * actual HF tokenizer output and is what matters for a "near the limit"
- * warning. */
-function estimateTokens(text: string): number {
-  if (!text) return 0;
-  return Math.ceil(text.length / 3.8);
-}
-
-function estimateMessageTokens(messages: AnyMessage[]): number {
-  let sum = 0;
-  for (const m of messages) {
-    if (m.role === "comparison") {
-      sum += estimateTokens(m.adapterText) + estimateTokens(m.baseText) + 8;
-    } else if (m.role === "tool_call") {
-      sum +=
-        estimateTokens(m.name) +
-        estimateTokens(JSON.stringify(m.args)) +
-        estimateTokens(m.output ?? "") +
-        estimateTokens(m.error ?? "") +
-        16;
-    } else if (m.role === "memory_chip") {
-      // Not included in prompt — see buildHistory.
-      continue;
-    } else if (m.role === "specialist_step") {
-      sum +=
-        estimateTokens(m.instruction) +
-        estimateTokens(m.output) +
-        estimateTokens(m.slug ?? "") +
-        16;
-    } else if (m.role === "specialist_plan") {
-      // Not sent to the model — see buildHistory.
-      continue;
-    } else if (m.role === "ab_comparison") {
-      // Only the picked (or baseline) lane is in the prompt — don't
-      // double-count the losing lane.
-      const picked =
-        m.pick === "variation" ? m.variationText : m.baselineText;
-      sum += estimateTokens(picked) + 8;
-    } else {
-      sum += estimateTokens(m.text) + 4; // + role overhead
-      if (m.role === "user" && m.attachments) {
-        // Attachment bodies are re-injected into the prompt at history
-        // time; their text counts toward the context window even though
-        // the stored `text` doesn't contain them.
-        for (const a of m.attachments) {
-          sum += estimateTokens(a.text ?? "") + 8;
-        }
-      }
-    }
-  }
-  return sum;
-}
-
-/** Planner adapter slug lookup for Specialist mode. Matches the plan's
- * exact slugs (`opus-reasoning-e2b` / `-e4b`) first, then falls back to any
- * installed adapter whose name contains `opus-reasoning` and the base's
- * size tag. Returns null when no suitable planner is installed. */
-function findPlannerAdapter(
-  adapters: { name: string }[],
-  baseParams: string | null,
-): string | null {
-  const size = (baseParams ?? "").toLowerCase();
-  const exact =
-    size === "e2b" ? "opus-reasoning-e2b" : size === "e4b" ? "opus-reasoning-e4b" : null;
-  if (exact && adapters.some((a) => a.name === exact)) return exact;
-  for (const a of adapters) {
-    const n = a.name.toLowerCase();
-    if (!n.includes("opus-reasoning")) continue;
-    if (size && !n.includes(size)) continue;
-    return a.name;
-  }
-  return null;
-}
-
-/** Context window per base family. Numbers are conservative — we'd rather
- * warn at 6.5k when the real cap is 8k than miss a warning. Keyed by
- * substrings of `base_model_id` so we don't have to exhaustively list
- * every repo. */
-function contextLimitFor(baseId: string | null | undefined): number {
-  if (!baseId) return 8192;
-  const id = baseId.toLowerCase();
-  if (id.includes("gemma-4") || id.includes("gemma4")) return 8192;
-  if (id.includes("gemma-3") || id.includes("gemma3")) return 8192;
-  if (id.includes("llama-3") || id.includes("llama3")) return 8192;
-  return 8192;
-}
-
-/** Short date/time anchor prepended to every system message. Gemma has no
- * internal clock — without this it resolves "tomorrow" / "this year" from
- * its training cutoff, which produces wrong answers for anything temporal. */
-function currentDateContext(): string {
-  const now = new Date();
-  const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-  const weekday = now.toLocaleDateString("en-US", { weekday: "long" });
-  let tz = "UTC";
-  try {
-    tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  } catch {
-    // ignore — some exotic runtimes don't expose this
-  }
-  return `Today is ${iso} (${weekday}). The user's local timezone is ${tz}. Use this as ground truth for any time-sensitive question — "tomorrow", "next week", "this year" — and when deciding whether to run a fresh web_search.`;
-}
-
-function buildSystemMessage(
-  systemPrompt: string,
-  memories: Memory[],
-  learnedRules: string[] = [],
-): string {
-  const prompt = systemPrompt.trim();
-  const dateLine = currentDateContext();
-  // Learned rules are rendered as a small bulleted block the model can
-  // scan. We dedupe on the fly in case the user manually re-added a rule
-  // that a past A/B already picked.
-  const cleanedRules = Array.from(
-    new Set(learnedRules.map((r) => r.trim()).filter((r) => r.length > 0)),
-  );
-  const learnedBlock =
-    cleanedRules.length > 0
-      ? [
-          "Style preferences (learned from your past A/B picks — treat each as a soft rule):",
-          ...cleanedRules.map((r) => `- ${r}`),
-        ].join("\n")
-      : "";
-
-  if (!memories.length) {
-    const parts = [prompt, dateLine, learnedBlock].filter(
-      (s) => s.length > 0,
-    );
-    return parts.join("\n\n");
-  }
-
-  // Greedy fit: include memories oldest-updated-first until the block would
-  // overflow. Tail memories (newest) are the ones that get dropped — the
-  // rationale is that a fresh, un-curated memory is more likely to be noise
-  // than something you've had pinned for weeks.
-  const lines = ["The user has recorded the following durable notes about themselves. Use them to personalize responses; don't repeat them back verbatim unless asked."];
-  const baseBytes =
-    (prompt ? prompt.length + 2 : 0) +
-    dateLine.length +
-    2 +
-    (learnedBlock.length ? learnedBlock.length + 2 : 0);
-  let bytes = baseBytes + lines[0].length;
-  const sortedOldestFirst = [...memories].sort((a, b) => a.updated_at - b.updated_at);
-  for (const m of sortedOldestFirst) {
-    const suffix = m.kind ? ` (${m.kind})` : "";
-    const line = `- ${m.name}: ${m.content}${suffix}`;
-    if (bytes + line.length + 1 > MEMORY_SYSTEM_BUDGET) break;
-    lines.push(line);
-    bytes += line.length + 1;
-  }
-  const memoryBlock = lines.join("\n");
-  const parts = [prompt, dateLine, learnedBlock, memoryBlock].filter(
-    (s) => s.length > 0,
-  );
-  return parts.join("\n\n");
-}
-
 function App() {
-  const initial = useRef(loadPersistedChats());
-  const [status, setStatus] = useState<Status | null>(null);
+  const status = useChatStore((s) => s.status);
+  const setStatus = useChatStore((s) => s.setStatus);
   const [bases, setBases] = useState<StoreBase[]>(FALLBACK_BASES);
-  const [chats, setChats] = useState<Chat[]>(initial.current.chats);
-  const [activeChatId, setActiveChatId] = useState<string>(
-    initial.current.activeId || initial.current.chats[0].id,
-  );
-  const [input, setInput] = useState("");
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const chats = useChatStore((s) => s.chats);
+  const activeChatId = useChatStore((s) => s.activeChatId);
+  const setChatsStore = useChatStore((s) => s.setChats);
+  const setActiveChatIdStore = useChatStore((s) => s.setActiveChatId);
+  const patchActiveChatStore = useChatStore((s) => s.patchActiveChat);
+  const pushSystemStore = useChatStore((s) => s.pushSystem);
+  const newChatStore = useChatStore((s) => s.newChat);
+  // Local wrapper preserves the existing functional-update API (`setChats(prev => ...)`)
+  // so the rest of App.tsx stays unchanged for now.
+  const setChats: React.Dispatch<React.SetStateAction<Chat[]>> = (action) => {
+    if (typeof action === "function") {
+      setChatsStore((action as (prev: Chat[]) => Chat[])(useChatStore.getState().chats));
+    } else {
+      setChatsStore(action);
+    }
+  };
+  const setActiveChatId = setActiveChatIdStore;
+
+  // Composer state — store-backed so turn-runner.ts (PR1.3) can read it.
+  const input = useChatStore((s) => s.input);
+  const setInput = useChatStore((s) => s.setInput);
+  const attachments = useChatStore((s) => s.attachments);
+  const setAttachmentsStore = useChatStore((s) => s.setAttachments);
+  const setAttachments: React.Dispatch<React.SetStateAction<Attachment[]>> = (action) => {
+    if (typeof action === "function") {
+      setAttachmentsStore(action as (prev: Attachment[]) => Attachment[]);
+    } else {
+      setAttachmentsStore(action);
+    }
+  };
+
   // Which HF repos are materialized in ~/.cache/huggingface/hub. Used
   // to flag Models-view rows that won't trigger a multi-GB download on
   // click. Refetched on mount and after every successful base load.
@@ -884,37 +121,41 @@ function App() {
   }, []);
   const [dragOver, setDragOver] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [settings, setSettings] = useState<Settings>(loadSettings);
+
+  // Settings now persist via the chat-store middleware. The legacy
+  // saveSettings useEffect is removed below.
+  const settings = useChatStore((s) => s.settings);
+  const setSettingsStore = useChatStore((s) => s.setSettings);
+  const setSettings: React.Dispatch<React.SetStateAction<Settings>> = (action) => {
+    if (typeof action === "function") {
+      setSettingsStore((action as (prev: Settings) => Settings)(useChatStore.getState().settings));
+    } else {
+      setSettingsStore(action);
+    }
+  };
+
   // Ephemeral A/B tuning bookkeeping — lost on reload, which is fine
   // because the feature is opportunistic (no harm in missing a turn).
   const abTurnCountRef = useRef(0);
   const abRecentDeltasRef = useRef<string[]>([]);
-  const [inflightGenId, setInflightGenId] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem("lora-hub:sidebar-collapsed") === "1";
-    } catch {
-      return false;
-    }
-  });
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        "lora-hub:sidebar-collapsed",
-        sidebarCollapsed ? "1" : "0",
-      );
-    } catch {
-      // ignore
-    }
-  }, [sidebarCollapsed]);
-  const [busy, setBusy] = useState(false);
+  // Orchestration state — store-backed so turn-runner.ts can drive it.
+  const inflightGenId = useChatStore((s) => s.inflightGenId);
+  const setInflightGenId = useChatStore((s) => s.setInflightGenId);
+  const busy = useChatStore((s) => s.busy);
+  const setBusy = useChatStore((s) => s.setBusy);
+
+  const sidebarCollapsed = useChatStore((s) => s.sidebarCollapsed);
+  const setSidebarCollapsed = useChatStore((s) => s.setSidebarCollapsed);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [view, setView] = useState<View>("chat");
   const [storeSubView, setStoreSubView] = useState<"landing" | "browse">("landing");
   const [browsePreset, setBrowsePreset] = useState<{ useCase?: UseCase } | null>(null);
   const [adapterDetailSlug, setAdapterDetailSlug] = useState<string | null>(null);
-  const [memories, setMemories] = useState<Memory[]>([]);
+
+  // Memories — store-backed (read by turn-runner for system message).
+  const memories = useChatStore((s) => s.memories);
+  const setMemories = useChatStore((s) => s.setMemories);
   const [pendingMemory, setPendingMemory] = useState<
     | {
         toolCallId: string;
@@ -926,18 +167,34 @@ function App() {
   >(null);
   const [pendingBase, setPendingBase] = useState<StoreBase | null>(null);
   const [pendingDeleteBase, setPendingDeleteBase] = useState<StoreBase | null>(null);
-  const [compareMode, setCompareMode] = useState<boolean>(false);
-  const [computerUseMode, setComputerUseMode] = useState<boolean>(false);
-  const [specialistMode, setSpecialistMode] = useState<boolean>(false);
+  const compareMode = useChatStore((s) => s.compareMode);
+  const setCompareModeStore = useChatStore((s) => s.setCompareMode);
+  const computerUseMode = useChatStore((s) => s.computerUseMode);
+  const setComputerUseMode = useChatStore((s) => s.setComputerUseMode);
+  const specialistMode = useChatStore((s) => s.specialistMode);
+  const setSpecialistMode = useChatStore((s) => s.setSpecialistMode);
+  // Wrapper preserves the functional-update form used by `toggleCompareMutex`.
+  const setCompareMode: React.Dispatch<React.SetStateAction<boolean>> = (action) => {
+    if (typeof action === "function") {
+      setCompareModeStore((action as (prev: boolean) => boolean)(useChatStore.getState().compareMode));
+    } else {
+      setCompareModeStore(action);
+    }
+  };
   const [permissionPreset, setPermissionPresetState] = useState<Preset>("read_only");
   const [workspace, setWorkspaceState] = useState<Workspace | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const activeChat = chats.find((c) => c.id === activeChatId)!;
+  const activeChat = useMemo(
+    () => chats.find((c) => c.id === activeChatId)!,
+    [chats, activeChatId],
+  );
   const messages = activeChat.messages;
   const baseLoaded = !!status?.base_model_id;
-  const activeBase =
-    bases.find((b) => b.hf_repo === status?.base_model_id) ?? null;
+  const activeBase = useMemo(
+    () => bases.find((b) => b.hf_repo === status?.base_model_id) ?? null,
+    [bases, status?.base_model_id],
+  );
   const baseLabel = activeBase?.name ?? "no base";
   const isWelcome = messages.length === 0;
 
@@ -945,7 +202,7 @@ function App() {
   // history, the injected system block (prompt + date + memories), and the
   // text the user is currently typing. Output reservation (max_tokens)
   // isn't counted — it's what *remains* of the context budget.
-  const tokenUsage = (() => {
+  const tokenUsage = useMemo(() => {
     const systemBlock = buildSystemMessage(
       settings.systemPrompt,
       settings.useMemoryInContext ? memories : [],
@@ -956,7 +213,7 @@ function App() {
       estimateMessageTokens(messages) +
       estimateTokens(input);
     return { used, limit: contextLimitFor(status?.base_model_id) };
-  })();
+  }, [messages, input, settings, memories, status?.base_model_id]);
 
   async function refreshStatus() {
     try {
@@ -1039,20 +296,15 @@ function App() {
   }, [messages]);
 
   useEffect(() => {
-    persistChats(chats);
-  }, [chats]);
-
-  useEffect(() => {
+    // chats + activeChatId now persist via useChatStore middleware. The
+    // legacy localStorage write below is retained only for the active chat
+    // ID since downstream tools may still read it directly.
     try {
-      localStorage.setItem(ACTIVE_KEY, activeChatId);
+      localStorage.setItem("lora-hub:active-chat:v1", activeChatId);
     } catch {
       // ignore
     }
   }, [activeChatId]);
-
-  useEffect(() => {
-    saveSettings(settings);
-  }, [settings]);
 
   useEffect(() => {
     applyTheme(settings.theme);
@@ -1200,11 +452,10 @@ function App() {
     if (!status?.active_adapter && compareMode) setCompareMode(false);
   }, [status?.active_adapter, compareMode]);
 
-  const chatMode: ChatMode = computerUseMode
-    ? "cu"
-    : specialistMode
-      ? "specialist"
-      : "normal";
+  const chatMode: ChatMode = useMemo(
+    () => (computerUseMode ? "cu" : specialistMode ? "specialist" : "normal"),
+    [computerUseMode, specialistMode],
+  );
 
   /** Mutex-enforced mode setter used by the composer chip + palette. */
   function setChatMode(m: ChatMode) {
@@ -1270,24 +521,14 @@ function App() {
     }
   }
 
-  function patchActiveChat(fn: (c: Chat) => Chat) {
-    setChats((prev) => prev.map((c) => (c.id === activeChatId ? fn(c) : c)));
-  }
-
-  function pushSystem(text: string) {
-    patchActiveChat((c) => ({
-      ...c,
-      messages: [
-        ...c.messages,
-        { id: crypto.randomUUID(), role: "system", text },
-      ],
-    }));
-  }
+  // Thin wrappers around the store actions so App.tsx's call sites don't change.
+  // `patchActiveChat` and `pushSystem` resolve activeChatId at call time inside
+  // the store, fixing the closure bug noted in the original implementation.
+  const patchActiveChat = patchActiveChatStore;
+  const pushSystem = pushSystemStore;
 
   function newChat() {
-    const c = emptyChat();
-    setChats((prev) => [c, ...prev]);
-    setActiveChatId(c.id);
+    newChatStore();
     setView("chat");
   }
 
@@ -1832,6 +1073,12 @@ function App() {
       allowedToolNames.add("search_flights");
       allowedToolNames.add("search_dates");
     }
+    // Adapter self-management: the model can inspect + swap its own LoRA
+    // mid-turn. One-at-a-time is enforced because status.active_adapter is
+    // a single slot; `currentAdapter` below is the in-flight mirror.
+    allowedToolNames.add("list_adapters");
+    allowedToolNames.add("activate_adapter");
+    allowedToolNames.add("deactivate_adapter");
     const toolDefs =
       allowedToolNames.size > 0
         ? TOOL_DEFS.filter((t) => allowedToolNames.has(t.name))
@@ -1844,7 +1091,13 @@ function App() {
       settings.learnedRules,
     );
     let currentPrompt = promptForModel;
-    const MAX_STEPS = allowedToolNames.size > 0 ? 4 : 1;
+    // Headroom for: list_adapters → activate_adapter → answer → maybe fetch.
+    const MAX_STEPS = allowedToolNames.size > 0 ? 6 : 1;
+
+    // Adapter state mirror for this turn. Starts from what the caller passed,
+    // mutates on every activate_adapter / deactivate_adapter tool call so the
+    // very next generate step picks up the new adapter.
+    let currentAdapter = adapter;
 
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
@@ -1853,15 +1106,29 @@ function App() {
           ...c,
           messages: [
             ...c.messages,
-            { id: assistantId, role: "assistant", text: "", adapter, pending: true },
+            {
+              id: assistantId,
+              role: "assistant",
+              text: "",
+              adapter: currentAdapter,
+              pending: true,
+            },
           ],
         }));
 
         let assistantAccum = "";
         let toolCall: sidecar.SidecarToolCall | null = null;
 
+        // If the sidecar was LoRA-wrapped earlier this session but no adapter
+        // is active now, we must pass baseOnly so _lora_save_and_zero zeros
+        // the weights for this call. Otherwise stale LoRA weights would bleed
+        // in — op_generate only swaps when adapter is non-null.
+        const wrapped = !!status?.lora_wrapped;
+        const runBaseOnly = wrapped && !currentAdapter;
+
         const handle = sidecar.generate(currentPrompt, {
-          adapter: adapter ?? undefined,
+          adapter: currentAdapter ?? undefined,
+          baseOnly: runBaseOnly,
           messages: history,
           temperature: settings.temperature,
           topP: settings.topP,
@@ -1910,7 +1177,101 @@ function App() {
         }
 
         let result: Awaited<ReturnType<typeof runTool>>;
-        if (call.name === "save_memory") {
+        // Render a standard tool_call bubble for the adapter-control tools so
+        // the user sees the swap. Mutate `currentAdapter` + status so the next
+        // iteration's generate call actually uses the new adapter.
+        const renderAdapterBubble = (): string => {
+          const tcId = crypto.randomUUID();
+          const tcMsg: ToolCallMessage = {
+            id: tcId,
+            role: "tool_call",
+            callId: call.call_id,
+            name: call.name,
+            args: call.args,
+            status: "pending",
+          };
+          patchActiveChat((c) => ({ ...c, messages: [...c.messages, tcMsg] }));
+          return tcId;
+        };
+        const finalizeAdapterBubble = (
+          tcId: string,
+          r: Awaited<ReturnType<typeof runTool>>,
+        ) => {
+          patchActiveChat((c) => ({
+            ...c,
+            messages: c.messages.map((m) =>
+              m.id === tcId && m.role === "tool_call"
+                ? {
+                    ...m,
+                    status: r.status,
+                    output: r.output,
+                    error: r.error,
+                    truncated: r.truncated,
+                  }
+                : m,
+            ),
+          }));
+        };
+
+        if (call.name === "list_adapters") {
+          const tcId = renderAdapterBubble();
+          const installed = Array.from(
+            new Set([
+              ...(status?.adapters ?? []).map((a) => a.name),
+              ...downloadedAdapters.map((d) => d.slug),
+            ]),
+          );
+          const payload = installed.map((slug) => ({
+            slug,
+            active: slug === currentAdapter,
+          }));
+          result = { status: "success", output: JSON.stringify(payload) };
+          finalizeAdapterBubble(tcId, result);
+        } else if (call.name === "activate_adapter") {
+          const tcId = renderAdapterBubble();
+          const slug =
+            typeof call.args.slug === "string" ? call.args.slug.trim() : "";
+          if (!slug) {
+            result = {
+              status: "error",
+              error: "activate_adapter requires `slug`",
+            };
+          } else if (slug === currentAdapter) {
+            result = { status: "success", output: `already active: ${slug}` };
+          } else {
+            const attachErr = await ensureAdapterAttached(slug);
+            if (attachErr) {
+              result = { status: "error", error: attachErr };
+            } else {
+              setStatus((s) => (s ? { ...s, active_adapter: slug } : s));
+              currentAdapter = slug;
+              result = { status: "success", output: `activated ${slug}` };
+            }
+          }
+          finalizeAdapterBubble(tcId, result);
+        } else if (call.name === "deactivate_adapter") {
+          const tcId = renderAdapterBubble();
+          const doUnload = call.args.unload === true;
+          if (!currentAdapter) {
+            result = { status: "success", output: "no adapter was active" };
+          } else {
+            const prev = currentAdapter;
+            if (doUnload) {
+              try {
+                await sidecar.unloadAdapter(prev);
+              } catch {
+                // non-fatal — we still want to detach frontend-side
+              }
+            }
+            setStatus((s) => (s ? { ...s, active_adapter: null } : s));
+            currentAdapter = null;
+            result = {
+              status: "success",
+              output: `deactivated ${prev}${doUnload ? " (unloaded)" : ""}`,
+            };
+          }
+          finalizeAdapterBubble(tcId, result);
+        } else if (call.name === "save_memory") {
           // Memory save renders as a compact chip, gated by the user's policy.
           const mResult = await handleMemoryToolCall(call.args, activeChatId);
           const chip: MemoryChipMessage = {
@@ -3120,13 +2481,16 @@ function App() {
     setStatus((s) => (s ? { ...s, active_adapter: name } : s));
   }
 
-  const sidebarConversations: Conversation[] = chats
-    .filter((c) => c.messages.length > 0)
-    .map((c) => ({ id: c.id, title: c.title, pinned: !!c.pinned }));
+  const sidebarConversations: Conversation[] = useMemo(
+    () =>
+      chats
+        .filter((c) => c.messages.length > 0)
+        .map((c) => ({ id: c.id, title: c.title, pinned: !!c.pinned })),
+    [chats],
+  );
 
-  const [downloadedAdapters, setDownloadedAdapters] = useState<
-    { slug: string; path: string }[]
-  >([]);
+  const downloadedAdapters = useChatStore((s) => s.downloadedAdapters);
+  const setDownloadedAdapters = useChatStore((s) => s.setDownloadedAdapters);
   useEffect(() => {
     let cancelled = false;
     const refresh = () => {
@@ -3143,29 +2507,39 @@ function App() {
       window.clearInterval(id);
     };
   }, []);
-  const loadedAdapterNames = new Set(status?.adapters.map((a) => a.name) ?? []);
-  const installedSlugs = new Set<string>([
-    ...loadedAdapterNames,
-    ...downloadedAdapters.map((d) => d.slug),
-  ]);
-  const mergedAdapters: AdapterEntryMerged[] = [
-    ...(status?.adapters ?? []).map((a) => ({
-      name: a.name,
-      path: a.path,
-      base_sha: a.base_sha,
-      downloaded_only: false,
-    })),
-    ...downloadedAdapters
-      .filter((d) => !loadedAdapterNames.has(d.slug))
-      .map((d) => ({
-        name: d.slug,
-        path: d.path,
-        base_sha: null as string | null,
-        downloaded_only: true,
+  const loadedAdapterNames = useMemo(
+    () => new Set(status?.adapters.map((a) => a.name) ?? []),
+    [status?.adapters],
+  );
+  const installedSlugs = useMemo(
+    () =>
+      new Set<string>([
+        ...loadedAdapterNames,
+        ...downloadedAdapters.map((d) => d.slug),
+      ]),
+    [loadedAdapterNames, downloadedAdapters],
+  );
+  const mergedAdapters: AdapterEntryMerged[] = useMemo(
+    () => [
+      ...(status?.adapters ?? []).map((a) => ({
+        name: a.name,
+        path: a.path,
+        base_sha: a.base_sha,
+        downloaded_only: false,
       })),
-  ];
+      ...downloadedAdapters
+        .filter((d) => !loadedAdapterNames.has(d.slug))
+        .map((d) => ({
+          name: d.slug,
+          path: d.path,
+          base_sha: null as string | null,
+          downloaded_only: true,
+        })),
+    ],
+    [status?.adapters, downloadedAdapters, loadedAdapterNames],
+  );
 
-  const paletteActions: PaletteAction[] = [
+  const paletteActions: PaletteAction[] = useMemo(() => [
     {
       kind: "action",
       id: "new-chat",
@@ -3247,9 +2621,9 @@ function App() {
       icon: PaletteIcons.Agent,
       run: () => setChatMode(chatMode === "specialist" ? "normal" : "specialist"),
     },
-  ];
+  ], [chatMode]);
 
-  const paletteChats: PaletteChat[] = chats.map((c) => {
+  const paletteChats: PaletteChat[] = useMemo(() => chats.map((c) => {
     // Most recent text-bearing message makes a cleaner preview than the
     // oldest one.
     const recent = [...c.messages]
@@ -3268,7 +2642,7 @@ function App() {
         setView("chat");
       },
     };
-  });
+  }), [chats]);
 
   return (
     <div className="relative flex h-full bg-app-bg text-app-text">
@@ -3293,7 +2667,7 @@ function App() {
         activeId={activeChatId}
         activeView={view}
         collapsed={sidebarCollapsed}
-        onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+        onToggleCollapsed={() => setSidebarCollapsed(!sidebarCollapsed)}
         onSelect={(id) => {
           setActiveChatId(id);
           setView("chat");
@@ -3304,7 +2678,7 @@ function App() {
         onOpenAdapters={() => setView("adapters")}
         onOpenSettings={() => setView("settings")}
         onTogglePin={togglePin}
-        userName={USER_NAME}
+        userName="You"
       />
 
       <main className="flex flex-1 flex-col">
@@ -3558,705 +2932,7 @@ function App() {
   );
 }
 
-function MemoryApprovalModal({
-  initial,
-  onCancel,
-  onConfirm,
-}: {
-  initial: MemoryInput;
-  onCancel: () => void;
-  onConfirm: (m: MemoryInput) => void;
-}) {
-  const [name, setName] = useState(initial.name);
-  const [content, setContent] = useState(initial.content);
-  const [kind, setKind] = useState<string>(initial.kind ?? "");
-  return (
-    <ConfirmModal
-      title="Save this memory?"
-      confirmLabel="Save memory"
-      body={
-        <div className="space-y-3">
-          <p className="text-xs text-app-text-faint">
-            The assistant proposes saving a durable note. Edit or cancel before it
-            becomes part of every future turn.
-          </p>
-          <label className="block">
-            <span className="font-mono text-[11px] tracking-[0.1em] uppercase text-app-text-muted">name</span>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              maxLength={80}
-              className="mt-1 w-full rounded-md border border-app-border bg-app-surface px-3 py-1.5 font-mono text-[12.5px] text-app-text focus:border-app-border-strong focus:outline-none"
-            />
-          </label>
-          <label className="block">
-            <span className="font-mono text-[11px] tracking-[0.1em] uppercase text-app-text-muted">content</span>
-            <textarea
-              rows={5}
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
-              maxLength={2000}
-              className="mt-1 w-full resize-y rounded-md border border-app-border bg-app-surface px-3 py-2 font-mono text-[12.5px] leading-[1.5] text-app-text focus:border-app-border-strong focus:outline-none"
-            />
-          </label>
-          <label className="block">
-            <span className="font-mono text-[11px] tracking-[0.1em] uppercase text-app-text-muted">kind</span>
-            <select
-              value={kind}
-              onChange={(e) => setKind(e.target.value)}
-              className="mt-1 w-full rounded-md border border-app-border bg-app-surface px-3 py-1.5 font-mono text-[12.5px] text-app-text focus:border-app-border-strong focus:outline-none"
-            >
-              <option value="">(none)</option>
-              <option value="preference">preference</option>
-              <option value="fact">fact</option>
-              <option value="project">project</option>
-              <option value="reference">reference</option>
-            </select>
-          </label>
-        </div>
-      }
-      onCancel={onCancel}
-      onConfirm={() => onConfirm({ name, content, kind: kind || null })}
-    />
-  );
-}
 
-function WelcomeScreen({
-  input,
-  onInputChange,
-  onSubmit,
-  disabled,
-  baseLabel,
-  adapters,
-  adapter,
-  onPickAdapter,
-  bases,
-  baseId,
-  onPickBase,
-  chips,
-  baseSha,
-  installedSlugs,
-  onTryAdapter,
-  workspacePath,
-  tokenUsage,
-  attachments,
-  onRemoveAttachment,
-  onPickFiles,
-  mode,
-  onSetMode,
-}: {
-  input: string;
-  onInputChange: (v: string) => void;
-  onSubmit: () => void;
-  disabled: boolean;
-  baseLabel: string;
-  adapters: { name: string }[];
-  adapter: string | null;
-  onPickAdapter: (n: string | null) => void;
-  bases: StoreBase[];
-  baseId: string | null;
-  onPickBase: (baseId: string) => void;
-  chips: ReturnType<typeof defaultChips>;
-  baseSha: string | null;
-  installedSlugs: Set<string>;
-  onTryAdapter: (adapter: StoreAdapter) => void;
-  workspacePath: string | null;
-  tokenUsage: { used: number; limit: number };
-  attachments: Attachment[];
-  onRemoveAttachment: (id: string) => void;
-  onPickFiles: () => void;
-  mode: ChatMode;
-  onSetMode: (m: ChatMode) => void;
-}) {
-  const ready = !!baseSha;
-  const eyebrow = `${adapter ?? "no adapter"} · ${baseLabel} · ${
-    ready ? "ready" : "load base to begin"
-  }`;
-
-  // Up to 4 colored suggestions — one per installed adapter, else fall back
-  // to the curated starter prompts.
-  const suggestions: { text: string; color: string; onClick: () => void }[] =
-    adapters.length > 0
-      ? adapters.slice(0, 4).map((a) => ({
-          text: starterPromptFor(a.name),
-          color: adapterAccent(a.name).text,
-          onClick: () => {
-            onPickAdapter(a.name);
-            onInputChange(starterPromptFor(a.name));
-          },
-        }))
-      : [];
-
-  return (
-    <div className="flex flex-1 flex-col">
-      <div className="flex-1 overflow-y-auto px-6 py-10">
-        <div className="mx-auto max-w-[720px] text-center">
-          <div className="mb-2 font-mono text-[11px] tracking-[0.14em] uppercase text-app-text-faint">
-            {eyebrow}
-          </div>
-          <h1 className="m-0 font-serif text-[32px] font-medium tracking-[-0.01em] text-app-text">
-            How can I help you today?
-          </h1>
-          <p className="mx-auto mt-2.5 mb-5 max-w-[520px] text-[14px] leading-[1.55] text-app-text-muted">
-            Every turn is tagged with the adapter and base that produced it.
-            Swap adapters mid-conversation — the transcript keeps the receipts.
-          </p>
-
-          {suggestions.length > 0 ? (
-            <div className="mx-auto grid max-w-[560px] grid-cols-2 gap-2">
-              {suggestions.map((s, i) => (
-                <button
-                  key={i}
-                  onClick={s.onClick}
-                  className="flex items-start gap-2 rounded-lg border border-app-border bg-app-surface px-3 py-2.5 text-left text-[13px] leading-[1.45] text-app-text hover:border-app-border-strong hover:bg-app-surface-hover"
-                >
-                  <span
-                    aria-hidden="true"
-                    className="mt-[5px] inline-block h-2 w-2 shrink-0 rounded-[2px]"
-                    style={{ backgroundColor: s.color }}
-                  />
-                  <span>{s.text}</span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="mt-4">
-              <WalkthroughHint
-                baseLoaded={ready}
-                adaptersInstalled={adapters.length > 0}
-              />
-              <QuickChips chips={chips} />
-              {baseSha && (
-                <FeaturedAdapters
-                  baseSha={baseSha}
-                  installedSlugs={installedSlugs}
-                  onTry={onTryAdapter}
-                />
-              )}
-              {bases.some((b) => b.base_id === "gemma-4-e4b-it-4bit") && <Gemma4Tile />}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="border-t border-app-border bg-app-bg px-6 py-4">
-        <Composer
-          large
-          value={input}
-          onChange={onInputChange}
-          onSubmit={onSubmit}
-          disabled={disabled}
-          baseLabel={baseLabel}
-          baseId={baseId}
-          bases={bases}
-          onPickBase={onPickBase}
-          adapters={adapters}
-          adapterLabel={adapter}
-          onPickAdapter={onPickAdapter}
-          baseSha={baseSha}
-          workspacePath={workspacePath}
-          tokenUsage={tokenUsage}
-          attachments={attachments}
-          onRemoveAttachment={onRemoveAttachment}
-          onPickFiles={onPickFiles}
-          mode={mode}
-          onSetMode={onSetMode}
-        />
-      </div>
-    </div>
-  );
-}
-
-function starterPromptFor(adapterName: string): string {
-  const s = adapterName.toLowerCase();
-  if (s.includes("sql")) return "top 10 customers by revenue last quarter";
-  if (s.includes("email") || s.includes("rewrite"))
-    return "rewrite this email more formally";
-  if (s.includes("grep") || s.includes("tool"))
-    return "extract JSON from an nginx log line";
-  if (s.includes("summar")) return "summarize this thread in three bullets";
-  return `try ${adapterName} on a real task from your workspace`;
-}
-
-function ChatView({
-  messages,
-  input,
-  onInputChange,
-  onSubmit,
-  busy,
-  scrollRef,
-  baseLabel,
-  baseLoaded,
-  baseSha,
-  showThinkingInline,
-  adapters,
-  adapter,
-  onPickAdapter,
-  bases,
-  baseId,
-  onPickBase,
-  onRegenerate,
-  onStop,
-  canStop,
-  compareMode,
-  onToggleCompare,
-  compareAvailable,
-  mode,
-  onSetMode,
-  permissionPreset,
-  onPickPreset,
-  workspace,
-  onPickWorkspace,
-  tokenUsage,
-  attachments,
-  onRemoveAttachment,
-  onPickFiles,
-  onPickAB,
-}: {
-  messages: AnyMessage[];
-  input: string;
-  onInputChange: (v: string) => void;
-  onSubmit: () => void;
-  busy: boolean;
-  scrollRef: React.RefObject<HTMLDivElement | null>;
-  baseLabel: string;
-  baseLoaded: boolean;
-  baseSha: string | null;
-  showThinkingInline: boolean;
-  adapters: { name: string }[];
-  adapter: string | null;
-  onPickAdapter: (n: string | null) => void;
-  bases: StoreBase[];
-  baseId: string | null;
-  onPickBase: (baseId: string) => void;
-  onRegenerate: (assistantId: string) => void;
-  onStop: () => void;
-  canStop: boolean;
-  compareMode: boolean;
-  onToggleCompare: () => void;
-  compareAvailable: boolean;
-  mode: ChatMode;
-  onSetMode: (m: ChatMode) => void;
-  permissionPreset: Preset;
-  onPickPreset: (p: Preset) => void;
-  workspace: Workspace | null;
-  onPickWorkspace: () => void;
-  tokenUsage: { used: number; limit: number };
-  attachments: Attachment[];
-  onRemoveAttachment: (id: string) => void;
-  onPickFiles: () => void;
-  onPickAB: (id: string, choice: ABPick) => void;
-}) {
-  const lastAssistantId = (() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.role === "assistant" && !m.pending) return m.id;
-    }
-    return null;
-  })();
-  const pendingAssistantId = (() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.role === "assistant" && m.pending) return m.id;
-      if (m.role === "comparison" && m.pending) return m.id;
-    }
-    return null;
-  })();
-  // Walk messages to detect adapter swaps between consecutive assistant turns.
-  // We emit a SwapMarker row ahead of the new assistant turn when its adapter
-  // differs from the most recent prior assistant adapter.
-  const rendered: React.ReactNode[] = [];
-  let lastAssistantAdapter: string | null | undefined = undefined;
-  for (const m of messages) {
-    if (m.role === "assistant") {
-      if (
-        lastAssistantAdapter !== undefined &&
-        (m.adapter ?? null) !== (lastAssistantAdapter ?? null) &&
-        m.adapter
-      ) {
-        rendered.push(<SwapMarker key={`swap-${m.id}`} adapterName={m.adapter} />);
-      }
-      lastAssistantAdapter = m.adapter ?? null;
-    }
-    if (m.role === "comparison") {
-      rendered.push(
-        <CompareTurn
-          key={m.id}
-          message={m}
-          canStop={m.id === pendingAssistantId && canStop}
-          onStop={onStop}
-        />,
-      );
-      continue;
-    }
-    if (m.role === "tool_call") {
-      rendered.push(<ToolTurn key={m.id} message={m} />);
-      continue;
-    }
-    if (m.role === "memory_chip") {
-      rendered.push(<MemoryChip key={m.id} message={m} />);
-      continue;
-    }
-    if (m.role === "specialist_plan") {
-      rendered.push(<SpecialistPlanBubble key={m.id} message={m} />);
-      continue;
-    }
-    if (m.role === "specialist_step") {
-      rendered.push(<SpecialistStepBubble key={m.id} message={m} />);
-      continue;
-    }
-    if (m.role === "ab_comparison") {
-      rendered.push(
-        <TurnRow
-          key={m.id}
-          kind="comparison"
-          title={`a/b · ${m.delta.name}`}
-          metaLines={[m.delta.description]}
-        >
-          <ABComparePane message={m} onPick={onPickAB} />
-        </TurnRow>,
-      );
-      continue;
-    }
-    rendered.push(
-      <MessageTurn
-        key={m.id}
-        message={m}
-        canRegenerate={m.id === lastAssistantId && !busy}
-        onRegenerate={() => onRegenerate(m.id)}
-        canStop={m.id === pendingAssistantId && canStop}
-        onStop={onStop}
-        baseLabel={baseLabel}
-        showThinkingInline={showThinkingInline}
-      />,
-    );
-  }
-
-  return (
-    <>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-7">
-        <div className="mx-auto flex max-w-[1020px] flex-col gap-0">{rendered}</div>
-      </div>
-      <div className="border-t border-app-border bg-app-bg px-6 py-4">
-        <Composer
-          value={input}
-          onChange={onInputChange}
-          onSubmit={onSubmit}
-          disabled={busy || !baseLoaded}
-          placeholder={
-            mode === "cu"
-              ? "Describe a task — I'll use tools to do it"
-              : mode === "specialist"
-                ? "Describe the goal — the planner will delegate across adapters"
-                : compareMode
-                  ? "Compare prompt — base vs adapter"
-                  : baseLoaded
-                    ? "Reply…"
-                    : "Load the base model first"
-          }
-          baseLabel={baseLabel}
-          baseId={baseId}
-          bases={bases}
-          onPickBase={onPickBase}
-          adapters={adapters}
-          adapterLabel={adapter}
-          onPickAdapter={onPickAdapter}
-          compareMode={compareMode}
-          onToggleCompare={onToggleCompare}
-          compareAvailable={compareAvailable}
-          mode={mode}
-          onSetMode={onSetMode}
-          permissionPreset={permissionPreset}
-          onPickPreset={onPickPreset}
-          baseSha={baseSha}
-          workspacePath={workspace?.root ?? null}
-          tokenUsage={tokenUsage}
-          attachments={attachments}
-          onRemoveAttachment={onRemoveAttachment}
-          onPickFiles={onPickFiles}
-        />
-        {mode === "cu" && (
-          <WorkspaceFooter
-            workspace={workspace}
-            preset={permissionPreset}
-            baseLabel={baseLabel}
-            adapterName={adapter}
-            onPickWorkspace={onPickWorkspace}
-          />
-        )}
-      </div>
-    </>
-  );
-}
-
-function MessageTurn({
-  message,
-  canRegenerate,
-  onRegenerate,
-  canStop,
-  onStop,
-  baseLabel,
-  showThinkingInline,
-}: {
-  message: Message;
-  canRegenerate?: boolean;
-  onRegenerate?: () => void;
-  canStop?: boolean;
-  onStop?: () => void;
-  baseLabel: string;
-  showThinkingInline: boolean;
-}) {
-  if (message.role === "system") {
-    return (
-      <TurnRow kind="system" title="system">
-        <div className="flex max-w-md flex-col gap-1.5 rounded-md border border-app-border bg-app-surface/60 px-3 py-1.5 font-mono text-[11px] text-app-text-muted">
-          <div>{message.text}</div>
-          {message.progress && (
-            <div className="h-[3px] w-full overflow-hidden rounded-sm bg-app-border">
-              <div
-                className="h-full bg-app-accent transition-[width] duration-200"
-                style={{ width: `${Math.min(100, message.progress.percent)}%` }}
-              />
-            </div>
-          )}
-        </div>
-      </TurnRow>
-    );
-  }
-  if (message.role === "user") {
-    const hasAttachments = !!message.attachments?.length;
-    const hasText = !!message.text;
-    return (
-      <TurnRow kind="user" title="you">
-        {hasAttachments && (
-          <div className="mb-2 flex max-w-[760px] flex-wrap gap-2">
-            {message.attachments!.map((a) => (
-              <AttachmentCard key={a.id} attachment={a} />
-            ))}
-          </div>
-        )}
-        {(hasText || !hasAttachments) && (
-          <div className="max-w-[760px] rounded-[10px] border border-app-border bg-app-surface px-3.5 py-2.5 text-[14px] leading-[1.55] whitespace-pre-wrap text-app-text">
-            {message.text || (message.pending ? "…" : "")}
-          </div>
-        )}
-      </TurnRow>
-    );
-  }
-  // Assistant
-  const actions = (
-    <>
-      {canStop && onStop && (
-        <GutterBtn title="Stop generating" onClick={onStop}>
-          <Square size={9} className="fill-current" strokeWidth={0} />
-        </GutterBtn>
-      )}
-      {canRegenerate && onRegenerate && (
-        <GutterBtn title="Regenerate" onClick={onRegenerate}>
-          <RefreshCw size={10} strokeWidth={2} />
-        </GutterBtn>
-      )}
-    </>
-  );
-  const parsed = showThinkingInline
-    ? null
-    : parseThinking(message.text, !message.pending);
-  return (
-    <TurnRow
-      kind="assistant"
-      adapter={message.adapter ?? null}
-      title={message.adapter ?? "assistant"}
-      metaLines={[message.pending ? "streaming…" : undefined, baseLabel]}
-      actions={message.pending || canRegenerate ? actions : null}
-      pending={!!message.pending}
-    >
-      {parsed?.thought && (
-        <ThoughtDisclosure thought={parsed.thought} phase={parsed.phase} />
-      )}
-      <div className="max-w-[760px] text-[14px] leading-[1.6] text-app-text">
-        {(() => {
-          const body = parsed ? parsed.answer : message.text;
-          if (body) return <Markdown>{body}</Markdown>;
-          if (message.pending) return <span className="text-app-text-faint">…</span>;
-          return "";
-        })()}
-      </div>
-    </TurnRow>
-  );
-}
-
-function ToolTurn({ message }: { message: ToolCallMessage }) {
-  return (
-    <TurnRow kind="tool" title="tool" metaLines={[message.status]}>
-      <div className="max-w-[760px]">
-        <ToolCallBubble message={message} />
-      </div>
-    </TurnRow>
-  );
-}
-
-function MemoryChip({ message }: { message: MemoryChipMessage }) {
-  const labelTone =
-    message.status === "saved"
-      ? "text-app-text-muted"
-      : message.status === "denied"
-        ? "text-app-text-faint"
-        : "text-red-400";
-  const lineTone =
-    message.status === "error" ? "bg-red-500/40" : "bg-app-border";
-  const verb =
-    message.status === "saved"
-      ? "added to memory"
-      : message.status === "denied"
-        ? "memory not saved"
-        : "memory error";
-  return (
-    <div className="px-[calc(var(--turn-gutter)+18px)] py-1.5">
-      <div
-        className="flex items-center gap-3"
-        title={message.detail ?? ""}
-      >
-        <div className={`h-px flex-1 ${lineTone}`} />
-        <div
-          className={`flex items-center gap-1.5 font-mono text-[10.5px] tracking-[0.02em] ${labelTone}`}
-        >
-          <BookOpen size={11} strokeWidth={1.8} />
-          <span className="uppercase text-[9.5px] tracking-[0.12em] opacity-70">
-            {verb}
-          </span>
-          <span className="truncate max-w-[40ch] text-app-text">{message.name}</span>
-          {message.kind && (
-            <span className="text-app-text-faint">· {message.kind}</span>
-          )}
-        </div>
-        <div className={`h-px flex-1 ${lineTone}`} />
-      </div>
-    </div>
-  );
-}
-
-function WalkthroughHint({
-  baseLoaded,
-  adaptersInstalled,
-}: {
-  baseLoaded: boolean;
-  adaptersInstalled: boolean;
-}) {
-  const step = !baseLoaded
-    ? { n: 1, label: "pick a base model" }
-    : !adaptersInstalled
-      ? { n: 2, label: "install your first adapter" }
-      : { n: 3, label: "send a prompt — try compare mode after" };
-  return (
-    <div className="mx-auto mt-4 flex max-w-2xl items-center justify-center gap-2 font-mono text-[11px] text-app-text-faint">
-      <span className="rounded-sm border border-app-border px-1 py-0.5">
-        {step.n} / 3
-      </span>
-      <span>{step.label}</span>
-    </div>
-  );
-}
-
-function CompareTurn({
-  message,
-  canStop,
-  onStop,
-}: {
-  message: ComparisonMessage;
-  canStop?: boolean;
-  onStop?: () => void;
-}) {
-  const accent = adapterAccent(message.adapter);
-  const actions = canStop && onStop && (
-    <GutterBtn title="Stop generating" onClick={onStop}>
-      <Square size={9} className="fill-current" strokeWidth={0} />
-    </GutterBtn>
-  );
-  return (
-    <TurnRow
-      kind="comparison"
-      title={`compare · ${message.adapter}`}
-      metaLines={["same prompt · base vs adapter"]}
-      actions={actions || null}
-      pending={!!message.pending}
-    >
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <ComparePane
-          label="base"
-          text={message.baseText}
-          pending={message.pending === "base"}
-          done={message.pending !== "base" && !!message.baseText}
-        />
-        <ComparePane
-          label="adapter"
-          adapterName={message.adapter}
-          accentBorder={accent.border}
-          text={message.adapterText}
-          pending={message.pending === "adapter"}
-          done={message.pending === null && !!message.adapterText}
-        />
-      </div>
-    </TurnRow>
-  );
-}
-
-function ComparePane({
-  label,
-  adapterName,
-  accentBorder,
-  text,
-  pending,
-  done,
-}: {
-  label: string;
-  adapterName?: string;
-  accentBorder?: string;
-  text: string;
-  pending: boolean;
-  done: boolean;
-}) {
-  return (
-    <div
-      className="flex min-h-[160px] flex-col gap-2 rounded-lg border bg-app-surface p-3.5"
-      style={{ borderColor: accentBorder ?? undefined }}
-    >
-      <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.12em] text-app-text-faint">
-        <span>{label}</span>
-        {adapterName && <AdapterPill name={adapterName} />}
-        {pending && <span className="text-app-accent">· streaming</span>}
-      </div>
-      <div className="text-[13.5px] leading-[1.55] text-app-text">
-        {text ? (
-          <Markdown>{text}</Markdown>
-        ) : pending ? (
-          "…"
-        ) : done ? null : (
-          <span className="text-app-text-faint">(waiting)</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function AdapterPill({ name }: { name: string }) {
-  const accent = adapterAccent(name);
-  return (
-    <div
-      className="mb-1 inline-flex items-center rounded-sm border px-1.5 py-0 font-mono text-[10px] font-medium"
-      style={{
-        backgroundColor: accent.bg,
-        color: accent.text,
-        borderColor: accent.border,
-      }}
-    >
-      {name}
-    </div>
-  );
-}
-
-function emptyChat(): Chat {
-  return { id: crypto.randomUUID(), title: "", messages: [] };
-}
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
