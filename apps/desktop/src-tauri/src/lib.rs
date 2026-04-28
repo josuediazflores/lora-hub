@@ -1,6 +1,7 @@
 mod attachments;
 mod audit;
 mod cache;
+
 mod db;
 mod mcp;
 mod memory;
@@ -118,6 +119,40 @@ fn set_preset(
 #[tauri::command]
 fn get_preset(state: tauri::State<'_, PresetState>) -> Preset {
     *state.0.lock().unwrap()
+}
+
+#[tauri::command]
+fn audit_log_read(
+    app: AppHandle,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<audit::AuditRow>, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    audit::read_log(&data_dir, limit.unwrap_or(500), offset.unwrap_or(0))
+}
+
+#[tauri::command]
+fn audit_log_clear(app: AppHandle) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    audit::clear_log(&data_dir)
+}
+
+#[tauri::command]
+fn audit_log_path(app: AppHandle) -> Result<String, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(audit::log_path(&data_dir).to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn audit_log_export(app: AppHandle, dest: String) -> Result<u64, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let src = audit::log_path(&data_dir);
+    if !src.exists() {
+        // Empty log → write an empty file so the user gets a valid (empty) export.
+        std::fs::write(&dest, "").map_err(|e| format!("write {dest}: {e}"))?;
+        return Ok(0);
+    }
+    std::fs::copy(&src, &dest).map_err(|e| format!("copy to {dest}: {e}"))
 }
 
 #[tauri::command]
@@ -511,6 +546,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -566,6 +603,11 @@ pub fn run() {
             tools::tool_glob,
             tools::tool_grep,
             tools::tool_run_command,
+            tools::tool_run_command_approved,
+            audit_log_read,
+            audit_log_clear,
+            audit_log_path,
+            audit_log_export,
             tools::tool_http_fetch,
             tools::tool_edit_file,
             tools::tool_fetch_page,

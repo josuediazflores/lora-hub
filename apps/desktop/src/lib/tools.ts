@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ToolDef } from "./sidecar";
 import { listMemories, type Memory } from "./memory";
+import { requestCommandApproval } from "./permission-bridge";
 
 /**
  * Tool registry passed to the sidecar so the model sees a compact spec of
@@ -550,25 +551,60 @@ export async function runTool(
         };
       }
       case "run_command": {
-        // TODO(security): wire PermissionPrompt for non-allowlisted commands
-        // so the Standard preset asks for explicit user approval before
-        // running anything outside permissions.rs's curated allowlist. The
-        // component (apps/desktop/src/components/PermissionPrompt.tsx)
-        // already exists; just needs an event channel from the backend
-        // when is_allowed_command would otherwise reject.
-        const result = await invoke<CommandResult>("tool_run_command", {
-          cmd: args.cmd,
-          args: (args.args as unknown[] | undefined) ?? [],
-          cwd: args.cwd ?? null,
-        });
-        const parts = [`exit ${result.exit_code}`];
-        if (result.stdout) parts.push(`stdout:\n${result.stdout}`);
-        if (result.stderr) parts.push(`stderr:\n${result.stderr}`);
-        return {
-          status: "success",
-          output: parts.join("\n\n"),
-          truncated: result.truncated,
-        };
+        const cmdArgs = ((args.args as unknown[] | undefined) ?? []).map((a) =>
+          String(a),
+        );
+        const cwd = (args.cwd as string | undefined) ?? null;
+        const cmd = String(args.cmd ?? "");
+        try {
+          const result = await invoke<CommandResult>("tool_run_command", {
+            cmd,
+            args: cmdArgs,
+            cwd,
+          });
+          const parts = [`exit ${result.exit_code}`];
+          if (result.stdout) parts.push(`stdout:\n${result.stdout}`);
+          if (result.stderr) parts.push(`stderr:\n${result.stderr}`);
+          return {
+            status: "success",
+            output: parts.join("\n\n"),
+            truncated: result.truncated,
+          };
+        } catch (e) {
+          // Allowlist denials surface from is_allowed_command in
+          // src-tauri/src/permissions.rs. We pattern-match the exact error
+          // text that helper produces ("not in the … allowlist" /
+          // "not allowed under the Read-only preset"). ALWAYS_DENY hits
+          // ("in the deny list") are *not* upgradeable — surface them as-is.
+          const msg = String(e);
+          const upgradeable =
+            /not in the .* allowlist/i.test(msg) ||
+            /not allowed under the Read-only preset/i.test(msg);
+          if (!upgradeable) {
+            return { status: "error", error: msg };
+          }
+          const decision = await requestCommandApproval({
+            cmd,
+            args: cmdArgs,
+            cwd,
+            reason: msg,
+          });
+          if (decision === "denied") {
+            return { status: "denied", error: msg };
+          }
+          const result = await invoke<CommandResult>(
+            "tool_run_command_approved",
+            { cmd, args: cmdArgs, cwd, scope: decision },
+          );
+          const parts = [`exit ${result.exit_code}`];
+          if (result.stdout) parts.push(`stdout:\n${result.stdout}`);
+          if (result.stderr) parts.push(`stderr:\n${result.stderr}`);
+          return {
+            status: "success",
+            output: parts.join("\n\n"),
+            truncated: result.truncated,
+          };
+        }
       }
       case "http_fetch": {
         const response = await invoke<HttpResponseRaw>("tool_http_fetch", {

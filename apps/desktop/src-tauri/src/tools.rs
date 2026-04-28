@@ -20,7 +20,7 @@ use tokio::process::Command;
 
 use crate::audit;
 use crate::permissions::{
-    is_allowed_command, is_allowed_http, is_allowed_write, Preset, PresetState,
+    self, is_allowed_command, is_allowed_http, is_allowed_write, Preset, PresetState,
 };
 use crate::workspace::{resolve_path, Workspace, WorkspaceState};
 
@@ -103,18 +103,39 @@ fn audit_start(
     workspace: Option<&Path>,
     args_summary: &str,
 ) -> Result<(PathBuf, audit::AuditContext), String> {
+    audit_start_inner(app, tool, workspace, args_summary, None)
+}
+
+fn audit_start_with_approval(
+    app: &AppHandle,
+    tool: &'static str,
+    workspace: Option<&Path>,
+    args_summary: &str,
+    approval: &str,
+) -> Result<(PathBuf, audit::AuditContext), String> {
+    audit_start_inner(app, tool, workspace, args_summary, Some(approval))
+}
+
+fn audit_start_inner(
+    app: &AppHandle,
+    tool: &'static str,
+    workspace: Option<&Path>,
+    args_summary: &str,
+    approval: Option<&str>,
+) -> Result<(PathBuf, audit::AuditContext), String> {
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("app_data_dir: {e}"))?;
     let preset_state: State<'_, PresetState> = app.state();
     let preset = *preset_state.0.lock().unwrap();
-    let ctx = audit::start_log(
+    let ctx = audit::start_log_with_approval(
         &data_dir,
         tool,
         preset_name(preset),
         workspace,
         args_summary,
+        approval,
     )?;
     Ok((data_dir, ctx))
 }
@@ -485,6 +506,96 @@ async fn run_command_inner(
         exit_code: out.status.code().unwrap_or(-1),
         truncated,
     })
+}
+
+/// Sibling of `tool_run_command` that runs commands the user explicitly
+/// approved via the inline `PermissionPrompt`. Skips `is_allowed_command`
+/// (so it works under Read-only/Standard for non-allowlisted commands) but
+/// still respects `ALWAYS_DENY` — a user can never approve `rm`, `sudo`,
+/// `shutdown`, etc., even from a Trusted preset. The audit entry records
+/// the approval scope so the trail is honest about why this ran.
+#[tauri::command]
+pub async fn tool_run_command_approved(
+    app: AppHandle,
+    ws_state: State<'_, WorkspaceState>,
+    cmd: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    scope: String,
+) -> Result<CommandResult, String> {
+    if scope != "once" && scope != "session" {
+        return Err(format!("invalid approval scope: {scope}"));
+    }
+    let bare = cmd.split('/').last().unwrap_or(&cmd);
+    if permissions::ALWAYS_DENY.contains(&bare) {
+        return Err(format!(
+            "'{cmd}' is in the deny list and cannot be approved"
+        ));
+    }
+
+    let ws = current_workspace(&ws_state)?;
+    let args_summary = json!({
+        "cmd": trunc(&cmd, 100),
+        "args_count": args.len(),
+        "cwd": cwd.as_deref().map(|c| trunc(c, 100)),
+    })
+    .to_string();
+    let (data_dir, ctx) = audit_start_with_approval(
+        &app,
+        "run_command",
+        Some(&ws.root),
+        &args_summary,
+        &scope,
+    )?;
+
+    let working_dir = match cwd.as_deref() {
+        Some(c) => resolve_path(&ws.root, c),
+        None => std::fs::canonicalize(&ws.root).map_err(|e| e.to_string()),
+    };
+    let result = match working_dir {
+        Err(e) => Err(e),
+        Ok(working_dir) => {
+            let fut = Command::new(&cmd)
+                .args(&args)
+                .current_dir(&working_dir)
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap_or_default())
+                .env("HOME", std::env::var("HOME").unwrap_or_default())
+                .output();
+            match tokio::time::timeout(CMD_TIMEOUT, fut).await {
+                Err(_) => Err(format!(
+                    "run_command: timed out after {}s",
+                    CMD_TIMEOUT.as_secs()
+                )),
+                Ok(Err(e)) => Err(format!("run_command: {e}")),
+                Ok(Ok(out)) => {
+                    let mut stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+                    let mut stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                    let mut truncated = false;
+                    if stdout.len() > MAX_CMD_OUTPUT_BYTES {
+                        stdout.truncate(MAX_CMD_OUTPUT_BYTES);
+                        truncated = true;
+                    }
+                    if stderr.len() > MAX_CMD_OUTPUT_BYTES {
+                        stderr.truncate(MAX_CMD_OUTPUT_BYTES);
+                        truncated = true;
+                    }
+                    Ok(CommandResult {
+                        stdout,
+                        stderr,
+                        exit_code: out.status.code().unwrap_or(-1),
+                        truncated,
+                    })
+                }
+            }
+        }
+    };
+    let (status, bytes) = match &result {
+        Ok(r) => ("success", r.stdout.len() + r.stderr.len()),
+        Err(_) => ("error", 0),
+    };
+    audit::end_log(&data_dir, &ctx, status, bytes);
+    result
 }
 
 #[tauri::command]

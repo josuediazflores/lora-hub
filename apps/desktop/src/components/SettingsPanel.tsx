@@ -6,6 +6,7 @@ import {
   MEMORY_LIMITS,
   totalBytes,
 } from "../lib/memory";
+import { AuditLogSection } from "./AuditLogSection";
 
 export type Theme = "dark" | "light" | "system";
 export type MemoryWritePolicy = "off" | "ask" | "auto";
@@ -274,6 +275,14 @@ export function SettingsPage({ settings, onChange, onBack, memories, onSaveMemor
               value={settings.webToolsInNormalChat}
               onChange={(v) => onChange({ ...settings, webToolsInNormalChat: v })}
             />
+          </Section>
+
+          <Section
+            number="07"
+            title="audit log"
+            dek="every tool call recorded on this device"
+          >
+            <AuditLogSection />
           </Section>
 
           <div className="mt-10 flex items-center justify-between border-t border-app-border pt-6">

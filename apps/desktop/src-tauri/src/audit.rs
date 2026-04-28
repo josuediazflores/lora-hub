@@ -11,12 +11,14 @@
 //! are redacted at the tool boundary before they reach `start_log`, so
 //! the log itself never contains secrets — only sizes and shapes.
 
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 pub struct AuditContext {
@@ -31,8 +33,23 @@ pub fn start_log(
     workspace: Option<&Path>,
     args_summary: &str,
 ) -> Result<AuditContext, String> {
+    start_log_with_approval(data_dir, tool, preset, workspace, args_summary, None)
+}
+
+/// Variant that records an `"approval"` field on the start entry. Used by
+/// `tool_run_command_approved` so the audit trail captures *why* a
+/// non-allowlisted command was permitted to run (`"once"`, `"session"`, or
+/// `"denied"`).
+pub fn start_log_with_approval(
+    data_dir: &Path,
+    tool: &str,
+    preset: &str,
+    workspace: Option<&Path>,
+    args_summary: &str,
+    approval: Option<&str>,
+) -> Result<AuditContext, String> {
     let id = Uuid::new_v4().to_string();
-    let entry = json!({
+    let mut entry = json!({
         "ts": now_epoch_seconds(),
         "id": id,
         "phase": "start",
@@ -41,6 +58,9 @@ pub fn start_log(
         "workspace": workspace.map(|p| p.display().to_string()),
         "args": args_summary,
     });
+    if let Some(decision) = approval {
+        entry["approval"] = json!(decision);
+    }
     append_line(data_dir, &entry.to_string())?;
     Ok(AuditContext {
         id,
@@ -82,6 +102,150 @@ fn now_epoch_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// One row exposed to the UI viewer. Pairs the start + end entries by uuid
+/// so the viewer doesn't have to do that bookkeeping itself.
+#[derive(Debug, Serialize)]
+pub struct AuditRow {
+    pub id: String,
+    pub ts: u64,
+    pub tool: String,
+    pub preset: String,
+    pub workspace: Option<String>,
+    pub args: String,
+    /// "success" | "error" | "pending" (the latter only for orphan starts).
+    pub status: String,
+    pub bytes: u64,
+    pub duration_ms: u64,
+    pub approval: Option<String>,
+}
+
+/// Read up to `limit` audit rows ending at `offset` from the newest entry.
+/// Pairs every `start` line with its matching `end` line by id; orphan
+/// starts (e.g. the app crashed mid-tool) are returned with `status: pending`.
+///
+/// Returned rows are newest-first.
+pub fn read_log(
+    data_dir: &Path,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<AuditRow>, String> {
+    let path = data_dir.join("audit.log");
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("audit log: {e}")),
+    };
+    let reader = BufReader::new(file);
+
+    // Two passes: 1) collect end entries by id; 2) walk starts and emit
+    // joined rows. Holding the whole log in memory is fine for the
+    // current write rate (a few entries per tool call); revisit when
+    // log size becomes a real concern.
+    let mut starts: Vec<Value> = Vec::new();
+    let mut ends: HashMap<String, Value> = HashMap::new();
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) if !l.trim().is_empty() => l,
+            _ => continue,
+        };
+        let v: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        match v.get("phase").and_then(|p| p.as_str()) {
+            Some("start") => starts.push(v),
+            Some("end") => {
+                if let Some(id) = v.get("id").and_then(|i| i.as_str()) {
+                    ends.insert(id.to_string(), v);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut rows: Vec<AuditRow> = Vec::with_capacity(starts.len());
+    for s in starts {
+        let id = s.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        let end = ends.get(&id);
+        rows.push(AuditRow {
+            id: id.clone(),
+            ts: s.get("ts").and_then(|t| t.as_u64()).unwrap_or(0),
+            tool: s
+                .get("tool")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string(),
+            preset: s
+                .get("preset")
+                .and_then(|p| p.as_str())
+                .unwrap_or("")
+                .to_string(),
+            workspace: s
+                .get("workspace")
+                .and_then(|w| w.as_str())
+                .map(String::from),
+            args: s
+                .get("args")
+                .and_then(|a| a.as_str())
+                .unwrap_or("")
+                .to_string(),
+            status: end
+                .and_then(|e| e.get("status").and_then(|s| s.as_str()))
+                .unwrap_or("pending")
+                .to_string(),
+            bytes: end
+                .and_then(|e| e.get("bytes").and_then(|b| b.as_u64()))
+                .unwrap_or(0),
+            duration_ms: end
+                .and_then(|e| e.get("duration_ms").and_then(|d| d.as_u64()))
+                .unwrap_or(0),
+            approval: s
+                .get("approval")
+                .and_then(|a| a.as_str())
+                .map(String::from),
+        });
+    }
+    // Newest first, then apply offset/limit.
+    rows.sort_by(|a, b| b.ts.cmp(&a.ts));
+    let start = offset.min(rows.len());
+    let end = (offset + limit).min(rows.len());
+    Ok(rows[start..end].to_vec())
+}
+
+/// Truncate the audit log to zero bytes. The file itself stays so the next
+/// `append_line` succeeds without the create_dir_all dance running again.
+pub fn clear_log(data_dir: &Path) -> Result<(), String> {
+    let path = data_dir.join("audit.log");
+    match File::create(&path) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("audit log: {e}")),
+    }
+}
+
+/// Path to the on-disk audit log. Used by the export command so the
+/// frontend can copy the file without round-tripping bytes through IPC.
+pub fn log_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("audit.log")
+}
+
+// AuditRow needs Clone for the slice copy above.
+impl Clone for AuditRow {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            ts: self.ts,
+            tool: self.tool.clone(),
+            preset: self.preset.clone(),
+            workspace: self.workspace.clone(),
+            args: self.args.clone(),
+            status: self.status.clone(),
+            bytes: self.bytes,
+            duration_ms: self.duration_ms,
+            approval: self.approval.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

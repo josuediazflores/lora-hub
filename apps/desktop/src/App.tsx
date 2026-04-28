@@ -73,7 +73,14 @@ import type { StoreAdapter, StoreBase } from "./lib/store";
 import { FALLBACK_BASES } from "./lib/fallback-bases";
 import { ChatView } from "./components/ChatView";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { FirstRunWizard, FIRST_RUN_KEY, type DownloadProgress } from "./components/FirstRunWizard";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { MemoryApprovalModal } from "./components/MemoryApprovalModal";
+import { PermissionPrompt } from "./components/PermissionPrompt";
+import {
+  setCommandApprovalRequester,
+  type CommandApprovalRequest,
+} from "./lib/permission-bridge";
 
 type View = SidebarView;
 
@@ -165,6 +172,17 @@ function App() {
       }
     | null
   >(null);
+  const [pendingCommand, setPendingCommand] = useState<
+    | {
+        request: CommandApprovalRequest;
+        resolve: (decision: "once" | "session" | "denied") => void;
+      }
+    | null
+  >(null);
+  // Per-session approvals — keyed by argv[0] (the bare command). Keeps a
+  // second `curl` in the same chat from re-prompting the user. Cleared on
+  // app reload, never persisted.
+  const sessionApprovedCommandsRef = useRef<Set<string>>(new Set());
   const [pendingBase, setPendingBase] = useState<StoreBase | null>(null);
   const [pendingDeleteBase, setPendingDeleteBase] = useState<StoreBase | null>(null);
   const compareMode = useChatStore((s) => s.compareMode);
@@ -184,6 +202,25 @@ function App() {
   const [permissionPreset, setPermissionPresetState] = useState<Preset>("read_only");
   const [workspace, setWorkspaceState] = useState<Workspace | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // First-run gate. We render the wizard until either (a) the user finishes
+  // the flow (we set the flag) or (b) they explicitly skip. After that the
+  // regular UI renders forever — Models view handles changing the base later.
+  const [firstRunComplete, setFirstRunComplete] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(FIRST_RUN_KEY) === "1";
+    } catch {
+      return true; // private browsing / quota — don't trap users in onboarding
+    }
+  });
+  const completeFirstRun = () => {
+    try {
+      localStorage.setItem(FIRST_RUN_KEY, "1");
+    } catch {
+      // ignore
+    }
+    setFirstRunComplete(true);
+  };
 
   const activeChat = useMemo(
     () => chats.find((c) => c.id === activeChatId)!,
@@ -240,6 +277,31 @@ function App() {
     getPreset().then(setPermissionPresetState).catch(() => {});
     getWorkspace().then(setWorkspaceState).catch(() => {});
     listMemories().then(setMemories).catch(() => {});
+  }, []);
+
+  // Register the command-approval bridge so lib/tools.ts's run_command
+  // handler can pop the inline PermissionPrompt without importing App.
+  // Session approvals (the `Set` in sessionApprovedCommandsRef) auto-resolve
+  // here so the prompt only appears the first time per command per session.
+  useEffect(() => {
+    setCommandApprovalRequester(async (req) => {
+      const bare = bareCommand(req.cmd);
+      if (sessionApprovedCommandsRef.current.has(bare)) {
+        return "session";
+      }
+      return new Promise<"once" | "session" | "denied">((resolve) => {
+        setPendingCommand({
+          request: req,
+          resolve: (decision) => {
+            if (decision === "session") {
+              sessionApprovedCommandsRef.current.add(bare);
+            }
+            resolve(decision);
+          },
+        });
+      });
+    });
+    return () => setCommandApprovalRequester(null);
   }, []);
 
   async function refreshMemories() {
@@ -2644,6 +2706,38 @@ function App() {
     };
   }), [chats]);
 
+  if (!firstRunComplete) {
+    return (
+      <FirstRunWizard
+        bases={bases}
+        onLoadBase={async (base, onProgress) => {
+          const res = await sidecar.loadBase(base.hf_repo, {
+            onProgress: (p) =>
+              onProgress({
+                desc: p.desc ?? "",
+                n: p.n ?? 0,
+                total: p.total ?? 0,
+                percent: p.percent ?? 0,
+              } satisfies DownloadProgress),
+          });
+          if (res.type === "error") {
+            return { ok: false, message: res.error.message };
+          }
+          try {
+            localStorage.setItem(LAST_BASE_KEY, base.base_id);
+          } catch {
+            // ignore
+          }
+          await refreshStatus();
+          listCachedHfModels().then(setCachedRepos).catch(() => {});
+          return { ok: true };
+        }}
+        onComplete={completeFirstRun}
+        onSkip={completeFirstRun}
+      />
+    );
+  }
+
   return (
     <div className="relative flex h-full bg-app-bg text-app-text">
       <CommandPalette
@@ -2682,6 +2776,7 @@ function App() {
       />
 
       <main className="flex flex-1 flex-col">
+        <UpdateBanner />
         {statusError && (
           <div className="border-b border-app-border bg-app-surface px-4 py-2 text-xs text-app-accent">
             sidecar: {statusError}
@@ -2928,8 +3023,48 @@ function App() {
           }}
         />
       )}
+
+      {pendingCommand && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-app-bg/70 px-6 backdrop-blur-sm">
+          <div className="w-full max-w-[520px]">
+            <PermissionPrompt
+              title="Approve shell command?"
+              details={renderCommandDetails(pendingCommand.request)}
+              onAllowOnce={() => {
+                pendingCommand.resolve("once");
+                setPendingCommand(null);
+              }}
+              onAllowSession={() => {
+                pendingCommand.resolve("session");
+                setPendingCommand(null);
+              }}
+              onDeny={() => {
+                pendingCommand.resolve("denied");
+                setPendingCommand(null);
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function bareCommand(cmd: string): string {
+  const slash = cmd.lastIndexOf("/");
+  return slash >= 0 ? cmd.slice(slash + 1) : cmd;
+}
+
+function renderCommandDetails(req: CommandApprovalRequest): string {
+  const argv = [req.cmd, ...req.args].map(quoteArg).join(" ");
+  const lines = [argv];
+  if (req.cwd) lines.push(`cwd: ${req.cwd}`);
+  lines.push("", req.reason);
+  return lines.join("\n");
+}
+
+function quoteArg(s: string): string {
+  return /[\s"'`$()<>|&;*?]/.test(s) ? `'${s.replace(/'/g, "'\\''")}'` : s;
 }
 
 

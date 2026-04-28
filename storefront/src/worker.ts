@@ -184,6 +184,81 @@ app.get("/r2/:key{.+}", async (c) => {
   });
 });
 
+// ─── Updater feed ────────────────────────────────────────────────────────────
+//
+// Tauri's updater plugin polls
+//   /updates/{target}/{arch}/{current_version}?channel=…
+// and expects either 204 (no update) or a JSON body with `version`, `pub_date`,
+// `notes`, and a `platforms` map keyed by `target-arch`. We back the channel
+// with a static manifest stored as a D1 row keyed by (channel, target-arch).
+// Fields:
+//   channel       'stable' | 'beta'
+//   target_arch   'darwin-aarch64' | 'darwin-x86_64' | 'windows-x86_64' | …
+//   version       semver of the published artifact
+//   pub_date      ISO-8601
+//   notes         markdown release notes
+//   url           direct .tar.gz / .app.tar.gz / .msi.zip URL
+//   signature     minisign signature emitted by `tauri build` (createUpdaterArtifacts)
+//
+// The route returns the *latest* row for the matching channel+target whose
+// `version` is greater than `{current_version}`. Tauri compares semver, so a
+// 200 with the same version is fine, but 204 keeps log noise down.
+
+type UpdateRow = {
+  channel: string;
+  target_arch: string;
+  version: string;
+  pub_date: string;
+  notes: string | null;
+  url: string;
+  signature: string;
+};
+
+app.get("/updates/:target/:arch/:current", async (c) => {
+  const target = c.req.param("target");      // 'darwin' | 'windows' | 'linux'
+  const arch = c.req.param("arch");          // 'aarch64' | 'x86_64'
+  const current = c.req.param("current");    // semver of the running build
+  const channel = c.req.query("channel") ?? "stable";
+  const targetArch = `${target}-${arch}`;
+
+  const row = await c.env.DB.prepare(
+    "SELECT channel, target_arch, version, pub_date, notes, url, signature \
+     FROM updates \
+     WHERE channel = ?1 AND target_arch = ?2 \
+     ORDER BY pub_date DESC LIMIT 1",
+  )
+    .bind(channel, targetArch)
+    .first<UpdateRow>();
+
+  if (!row) return new Response(null, { status: 204 });
+  if (compareSemver(row.version, current) <= 0) {
+    return new Response(null, { status: 204 });
+  }
+
+  return c.json({
+    version: row.version,
+    pub_date: row.pub_date,
+    notes: row.notes ?? "",
+    platforms: {
+      [targetArch]: {
+        url: row.url,
+        signature: row.signature,
+      },
+    },
+  });
+});
+
+function compareSemver(a: string, b: string): number {
+  const pa = a.split(".").map((n) => Number(n));
+  const pb = b.split(".").map((n) => Number(n));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const ai = pa[i] ?? 0;
+    const bi = pb[i] ?? 0;
+    if (ai !== bi) return ai - bi;
+  }
+  return 0;
+}
+
 // Bumps the download counter; client calls this after a successful install.
 app.post("/adapters/:slug/installed", async (c) => {
   const slug = c.req.param("slug");
