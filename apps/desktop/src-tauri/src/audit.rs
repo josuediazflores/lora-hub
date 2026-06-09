@@ -85,6 +85,10 @@ pub fn end_log(data_dir: &Path, ctx: &AuditContext, status: &str, bytes: usize) 
     let _ = append_line(data_dir, &entry.to_string());
 }
 
+/// Rotate the live audit log once it passes this size, so it never grows
+/// unbounded. Exactly one previous generation is kept (`audit.log.1`).
+const MAX_AUDIT_BYTES: u64 = 8 * 1024 * 1024;
+
 fn append_line(data_dir: &Path, line: &str) -> Result<(), String> {
     std::fs::create_dir_all(data_dir).map_err(|e| format!("audit dir: {e}"))?;
     let path = data_dir.join("audit.log");
@@ -94,6 +98,15 @@ fn append_line(data_dir: &Path, line: &str) -> Result<(), String> {
         .open(&path)
         .map_err(|e| format!("audit log: {e}"))?;
     writeln!(f, "{}", line).map_err(|e| format!("audit log: {e}"))?;
+    // Rotate when the live log exceeds the cap. `read_log` reads both the live
+    // log and the rotated generation, so recent history survives a rotation.
+    if let Ok(meta) = f.metadata() {
+        if meta.len() > MAX_AUDIT_BYTES {
+            drop(f);
+            let rotated = data_dir.join("audit.log.1");
+            let _ = std::fs::rename(&path, &rotated);
+        }
+    }
     Ok(())
 }
 
@@ -131,37 +144,37 @@ pub fn read_log(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<AuditRow>, String> {
-    let path = data_dir.join("audit.log");
-    let file = match File::open(&path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("audit log: {e}")),
-    };
-    let reader = BufReader::new(file);
-
-    // Two passes: 1) collect end entries by id; 2) walk starts and emit
-    // joined rows. Holding the whole log in memory is fine for the
-    // current write rate (a few entries per tool call); revisit when
-    // log size becomes a real concern.
+    // Read the rotated generation first (older) then the live log (newer); the
+    // final sort is by timestamp, so file order doesn't matter. Parsing is
+    // bounded to the live log + one rotation (~2 × MAX_AUDIT_BYTES).
     let mut starts: Vec<Value> = Vec::new();
     let mut ends: HashMap<String, Value> = HashMap::new();
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) if !l.trim().is_empty() => l,
-            _ => continue,
+    for name in ["audit.log.1", "audit.log"] {
+        let path = data_dir.join(name);
+        let file = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("audit log: {e}")),
         };
-        let v: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        match v.get("phase").and_then(|p| p.as_str()) {
-            Some("start") => starts.push(v),
-            Some("end") => {
-                if let Some(id) = v.get("id").and_then(|i| i.as_str()) {
-                    ends.insert(id.to_string(), v);
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) if !l.trim().is_empty() => l,
+                _ => continue,
+            };
+            let v: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            match v.get("phase").and_then(|p| p.as_str()) {
+                Some("start") => starts.push(v),
+                Some("end") => {
+                    if let Some(id) = v.get("id").and_then(|i| i.as_str()) {
+                        ends.insert(id.to_string(), v);
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 
@@ -217,6 +230,8 @@ pub fn read_log(
 /// Truncate the audit log to zero bytes. The file itself stays so the next
 /// `append_line` succeeds without the create_dir_all dance running again.
 pub fn clear_log(data_dir: &Path) -> Result<(), String> {
+    // Drop any rotated generation too, so "clear" really clears.
+    let _ = std::fs::remove_file(data_dir.join("audit.log.1"));
     let path = data_dir.join("audit.log");
     match File::create(&path) {
         Ok(_) => Ok(()),

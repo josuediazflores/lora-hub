@@ -79,7 +79,9 @@ import { MemoryApprovalModal } from "./components/MemoryApprovalModal";
 import { PermissionPrompt } from "./components/PermissionPrompt";
 import {
   setCommandApprovalRequester,
+  setActionApprovalRequester,
   type CommandApprovalRequest,
+  type ActionApprovalRequest,
 } from "./lib/permission-bridge";
 
 type View = SidebarView;
@@ -93,6 +95,7 @@ function App() {
   const setChatsStore = useChatStore((s) => s.setChats);
   const setActiveChatIdStore = useChatStore((s) => s.setActiveChatId);
   const patchActiveChatStore = useChatStore((s) => s.patchActiveChat);
+  const patchChatStore = useChatStore((s) => s.patchChat);
   const pushSystemStore = useChatStore((s) => s.pushSystem);
   const newChatStore = useChatStore((s) => s.newChat);
   // Local wrapper preserves the existing functional-update API (`setChats(prev => ...)`)
@@ -179,10 +182,22 @@ function App() {
       }
     | null
   >(null);
-  // Per-session approvals — keyed by argv[0] (the bare command). Keeps a
-  // second `curl` in the same chat from re-prompting the user. Cleared on
+  // Per-session approvals — keyed by the FULL argv (cmd + args), so approving
+  // `curl example.com` does not also auto-approve `curl evil.com`. Cleared on
   // app reload, never persisted.
   const sessionApprovedCommandsRef = useRef<Set<string>>(new Set());
+  // Generic side-effecting-action approvals (e.g. Stripe money movement),
+  // rendered through the same PermissionPrompt.
+  const [pendingAction, setPendingAction] = useState<
+    | {
+        request: ActionApprovalRequest;
+        resolve: (decision: "once" | "session" | "denied") => void;
+      }
+    | null
+  >(null);
+  // Session approvals for generic actions, keyed by request.sessionKey. Money
+  // actions omit sessionKey, so they never land here and always re-prompt.
+  const sessionApprovedActionsRef = useRef<Set<string>>(new Set());
   const [pendingBase, setPendingBase] = useState<StoreBase | null>(null);
   const [pendingDeleteBase, setPendingDeleteBase] = useState<StoreBase | null>(null);
   const compareMode = useChatStore((s) => s.compareMode);
@@ -285,8 +300,8 @@ function App() {
   // here so the prompt only appears the first time per command per session.
   useEffect(() => {
     setCommandApprovalRequester(async (req) => {
-      const bare = bareCommand(req.cmd);
-      if (sessionApprovedCommandsRef.current.has(bare)) {
+      const key = commandKey(req);
+      if (sessionApprovedCommandsRef.current.has(key)) {
         return "session";
       }
       return new Promise<"once" | "session" | "denied">((resolve) => {
@@ -294,7 +309,7 @@ function App() {
           request: req,
           resolve: (decision) => {
             if (decision === "session") {
-              sessionApprovedCommandsRef.current.add(bare);
+              sessionApprovedCommandsRef.current.add(key);
             }
             resolve(decision);
           },
@@ -302,6 +317,43 @@ function App() {
       });
     });
     return () => setCommandApprovalRequester(null);
+  }, []);
+
+  // Generic action-approval bridge (Stripe money movement, etc.). Actions with
+  // a sessionKey can be remembered for the session; money actions omit it and
+  // always re-prompt.
+  useEffect(() => {
+    setActionApprovalRequester(async (req) => {
+      if (req.sessionKey && sessionApprovedActionsRef.current.has(req.sessionKey)) {
+        return "session";
+      }
+      return new Promise<"once" | "session" | "denied">((resolve) => {
+        setPendingAction({
+          request: req,
+          resolve: (decision) => {
+            if (decision === "session" && req.sessionKey) {
+              sessionApprovedActionsRef.current.add(req.sessionKey);
+            }
+            resolve(decision);
+          },
+        });
+      });
+    });
+    return () => setActionApprovalRequester(null);
+  }, []);
+
+  // The Brave API key is stored in the backend kv store (not in the persisted
+  // localStorage blob); hydrate it into in-memory settings on startup so the
+  // Settings field shows it and web_search can use it.
+  useEffect(() => {
+    invoke<string | null>("kv_get", { key: "brave_search_api_key" })
+      .then((v) => {
+        if (v) setSettings((prev) => ({ ...prev, braveApiKey: v }));
+      })
+      .catch(() => {
+        /* no key stored yet */
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function refreshMemories() {
@@ -1095,6 +1147,11 @@ function App() {
     adapter: string | null,
     attachments: Attachment[] = [],
   ) {
+    // Bind every patch in this turn to the chat it started in, so switching
+    // chats mid-stream can't misroute tokens or strand the assistant message.
+    const chatId = activeChatId;
+    const patchActiveChat = (fn: Parameters<typeof patchChatStore>[1]) =>
+      patchChatStore(chatId, fn);
     setBusy(true);
 
     // The user-visible turn (stored text) is just what they typed.
@@ -1134,6 +1191,22 @@ function App() {
       allowedToolNames.add("web_search");
       allowedToolNames.add("search_flights");
       allowedToolNames.add("search_dates");
+    }
+    if (settings.stripeToolsInNormalChat) {
+      allowedToolNames.add("create_payment_link");
+      allowedToolNames.add("create_invoice");
+      allowedToolNames.add("list_transactions");
+      allowedToolNames.add("refund_payment");
+      allowedToolNames.add("create_subscription");
+      allowedToolNames.add("list_subscriptions");
+      allowedToolNames.add("cancel_subscription");
+      allowedToolNames.add("advance_test_clock");
+      allowedToolNames.add("get_test_clock");
+      allowedToolNames.add("parse_receipt");
+      allowedToolNames.add("split_bill");
+      allowedToolNames.add("create_split_payment_links");
+      allowedToolNames.add("send_payment_requests");
+      allowedToolNames.add("split_status");
     }
     // Adapter self-management: the model can inspect + swap its own LoRA
     // mid-turn. One-at-a-time is enforced because status.active_adapter is
@@ -1335,7 +1408,7 @@ function App() {
           finalizeAdapterBubble(tcId, result);
         } else if (call.name === "save_memory") {
           // Memory save renders as a compact chip, gated by the user's policy.
-          const mResult = await handleMemoryToolCall(call.args, activeChatId);
+          const mResult = await handleMemoryToolCall(call.args, chatId);
           const chip: MemoryChipMessage = {
             id: crypto.randomUUID(),
             role: "memory_chip",
@@ -1411,6 +1484,10 @@ function App() {
       );
       return;
     }
+    // Bind every patch in this turn to the chat it started in (see runNormalTurn).
+    const chatId = activeChatId;
+    const patchActiveChat = (fn: Parameters<typeof patchChatStore>[1]) =>
+      patchChatStore(chatId, fn);
 
     setInput("");
     setBusy(true);
@@ -1546,7 +1623,7 @@ function App() {
 
         let result: Awaited<ReturnType<typeof runTool>>;
         if (call.name === "save_memory") {
-          result = await handleMemoryToolCall(call.args, activeChatId);
+          result = await handleMemoryToolCall(call.args, chatId);
         } else if (call.name === "compare_outputs") {
           result = await runCompareOutputs(call.args);
         } else {
@@ -1609,6 +1686,10 @@ function App() {
     userText: string,
     attachments: Attachment[] = [],
   ) {
+    // Bind every patch in this turn to the chat it started in (see runNormalTurn).
+    const chatId = activeChatId;
+    const patchActiveChat = (fn: Parameters<typeof patchChatStore>[1]) =>
+      patchChatStore(chatId, fn);
     let plannerSlug = findPlannerAdapter(
       status?.adapters ?? [],
       activeBase?.parameters ?? null,
@@ -2558,7 +2639,17 @@ function App() {
     const refresh = () => {
       invoke<{ slug: string; path: string }[]>("list_downloaded_adapters")
         .then((rows) => {
-          if (!cancelled) setDownloadedAdapters(rows);
+          if (cancelled) return;
+          // Only push (and re-render) when the set actually changed — this
+          // effect polls every 3s for the app's lifetime, and the list is
+          // unchanged the vast majority of the time.
+          const prev = useChatStore.getState().downloadedAdapters;
+          const same =
+            prev.length === rows.length &&
+            prev.every(
+              (p, i) => p.slug === rows[i].slug && p.path === rows[i].path,
+            );
+          if (!same) setDownloadedAdapters(rows);
         })
         .catch(() => {});
     };
@@ -2685,26 +2776,32 @@ function App() {
     },
   ], [chatMode]);
 
-  const paletteChats: PaletteChat[] = useMemo(() => chats.map((c) => {
-    // Most recent text-bearing message makes a cleaner preview than the
-    // oldest one.
-    const recent = [...c.messages]
-      .reverse()
-      .find((m) => m.role === "user" || m.role === "assistant") as
-      | Message
-      | undefined;
-    const preview = (recent?.text ?? "").replace(/\s+/g, " ").slice(0, 120);
-    return {
-      kind: "chat",
-      id: c.id,
-      title: c.title || "untitled",
-      preview,
-      run: () => {
-        setActiveChatId(c.id);
-        setView("chat");
-      },
-    };
-  }), [chats]);
+  const paletteChats: PaletteChat[] = useMemo(() => {
+    // Only build previews when the palette is actually open — otherwise this
+    // O(total messages) scan (reverse().find() per chat) would run on every
+    // streamed token while the palette is closed.
+    if (!paletteOpen) return [];
+    return chats.map((c) => {
+      // Most recent text-bearing message makes a cleaner preview than the
+      // oldest one.
+      const recent = [...c.messages]
+        .reverse()
+        .find((m) => m.role === "user" || m.role === "assistant") as
+        | Message
+        | undefined;
+      const preview = (recent?.text ?? "").replace(/\s+/g, " ").slice(0, 120);
+      return {
+        kind: "chat",
+        id: c.id,
+        title: c.title || "untitled",
+        preview,
+        run: () => {
+          setActiveChatId(c.id);
+          setView("chat");
+        },
+      };
+    });
+  }, [chats, paletteOpen]);
 
   if (!firstRunComplete) {
     return (
@@ -3046,13 +3143,37 @@ function App() {
           </div>
         </div>
       )}
+      {pendingAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-app-bg/70 px-6 backdrop-blur-sm">
+          <div className="w-full max-w-[520px]">
+            <PermissionPrompt
+              title={pendingAction.request.title}
+              details={pendingAction.request.details}
+              allowSession={!!pendingAction.request.sessionKey}
+              onAllowOnce={() => {
+                pendingAction.resolve("once");
+                setPendingAction(null);
+              }}
+              onAllowSession={() => {
+                pendingAction.resolve("session");
+                setPendingAction(null);
+              }}
+              onDeny={() => {
+                pendingAction.resolve("denied");
+                setPendingAction(null);
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function bareCommand(cmd: string): string {
-  const slash = cmd.lastIndexOf("/");
-  return slash >= 0 ? cmd.slice(slash + 1) : cmd;
+function commandKey(req: CommandApprovalRequest): string {
+  // Full argv (+ cwd) so a session approval is scoped to the exact invocation,
+  // not just the binary name.
+  return JSON.stringify([req.cmd, ...req.args, req.cwd ?? ""]);
 }
 
 function renderCommandDetails(req: CommandApprovalRequest): string {

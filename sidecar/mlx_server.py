@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import threading
 import traceback
@@ -70,6 +71,25 @@ ACTIVE_GENERATION_ID: str | None = None
 ACTIVE_ABORT_EVENT: threading.Event | None = None
 GEN_LOCK = threading.Lock()
 
+# Largest single generation we'll honour, regardless of what the client asks
+# for. Bounds runaway compute/KV-cache growth from an over-large `max_tokens`.
+MAX_TOKENS_CEILING = 8192
+
+
+def _reject_if_generating(op_name: str) -> None:
+    """Model-mutating ops (load/unload) must not run while a generation is
+    streaming in the worker thread — `generate` reads/zeroes `STATE.model`
+    off-lock, so swapping the model underneath it crashes or corrupts inference.
+    The main dispatch loop is single-threaded, so a load can only overlap an
+    already-running async generate; reject in that case."""
+    with GEN_LOCK:
+        if ACTIVE_GENERATION_ID is not None:
+            raise SidecarError(
+                "BUSY",
+                f"{op_name} cannot run while a generation is in progress "
+                f"({ACTIVE_GENERATION_ID}); abort it or wait for it to finish",
+            )
+
 
 class SidecarError(Exception):
     def __init__(self, code: str, message: str):
@@ -89,12 +109,20 @@ def sha256_file(path: Path, chunk: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+# Cache of computed base fingerprints, keyed by model_id. The value pairs the
+# shard signature (name/size/mtime per shard) with the digest, so we only
+# re-hash the multi-GB shards when the on-disk files actually change (HF cache
+# files are immutable once downloaded, so in practice this is hashed once).
+_FINGERPRINT_CACHE: dict[str, tuple[tuple, str]] = {}
+
+
 def fingerprint_base(model_id: str) -> str:
     """SHA-256 of the model's safetensors index, sorted file shards.
 
     We hash the index manifest plus the per-shard sha (when present in the index),
     falling back to hashing each shard if the index has no checksums. This produces
-    a stable identifier per (model, quant) combo.
+    a stable identifier per (model, quant) combo. Cached by shard signature so a
+    repeated load_base doesn't re-SHA every multi-GB shard from disk.
     """
     from huggingface_hub import snapshot_download
 
@@ -102,12 +130,20 @@ def fingerprint_base(model_id: str) -> str:
     shards = sorted(local_dir.glob("*.safetensors"))
     if not shards:
         raise SidecarError("INTERNAL", f"no safetensors shards under {local_dir}")
+    sig = tuple(
+        (s.name, s.stat().st_size, int(s.stat().st_mtime)) for s in shards
+    )
+    cached = _FINGERPRINT_CACHE.get(model_id)
+    if cached is not None and cached[0] == sig:
+        return cached[1]
     h = hashlib.sha256()
     h.update(model_id.encode())
     for shard in shards:
         h.update(shard.name.encode())
         h.update(sha256_file(shard).encode())
-    return h.hexdigest()
+    digest = h.hexdigest()
+    _FINGERPRINT_CACHE[model_id] = (sig, digest)
+    return digest
 
 
 from tqdm import tqdm as _tqdm
@@ -149,6 +185,7 @@ class ProgressTqdm(_tqdm):
 
 
 def op_load_base(req: dict) -> dict:
+    _reject_if_generating("load_base")
     model_id = req.get("model_id")
     if not model_id:
         raise SidecarError("INVALID_REQUEST", "load_base requires model_id")
@@ -316,6 +353,7 @@ def _assert_adapter_shapes_match(adapter_dir: Path, cfg: dict) -> None:
 
 
 def op_load_adapter(req: dict) -> dict:
+    _reject_if_generating("load_adapter")
     if STATE.model is None:
         raise SidecarError("BASE_NOT_LOADED", "load a base before loading adapters")
 
@@ -356,6 +394,7 @@ def op_load_adapter(req: dict) -> dict:
 
 
 def op_unload_adapter(req: dict) -> dict:
+    _reject_if_generating("unload_adapter")
     name = req.get("name")
     if not name:
         raise SidecarError("INVALID_REQUEST", "unload_adapter requires name")
@@ -393,7 +432,9 @@ def _lora_save_and_zero() -> None:
     STATE.saved_lora = lora_only
     zeros = [(k, mx.zeros(v.shape, dtype=v.dtype)) for k, v in lora_only.items()]
     STATE.model.load_weights(zeros, strict=False)
-    mx.eval(STATE.model.parameters())
+    # Only the lora_a/lora_b arrays changed — evaluating the whole parameter
+    # tree here would force-realize every (multi-GB) base tensor needlessly.
+    mx.eval([v for _, v in zeros])
 
 
 def _lora_restore() -> None:
@@ -402,7 +443,7 @@ def _lora_restore() -> None:
     if STATE.saved_lora is None:
         return
     STATE.model.load_weights(list(STATE.saved_lora.items()), strict=False)
-    mx.eval(STATE.model.parameters())
+    mx.eval(list(STATE.saved_lora.values()))
     STATE.saved_lora = None
 
 
@@ -425,8 +466,17 @@ def _swap_to_adapter(name: str | None) -> None:
     num_layers = entry.config.get("num_layers", 0)
     _ensure_wrapped(lora_params, num_layers)
 
+    from mlx.utils import tree_flatten
+
     STATE.model.load_weights(str(weights_path), strict=False)
-    mx.eval(STATE.model.parameters())
+    # Only the adapter's lora_a/lora_b tensors changed; realize just those
+    # rather than the entire parameter tree.
+    lora_vals = [
+        v
+        for k, v in tree_flatten(STATE.model.trainable_parameters())
+        if k.endswith(".lora_a") or k.endswith(".lora_b")
+    ]
+    mx.eval(lora_vals if lora_vals else STATE.model.parameters())
     STATE.active_adapter = name
     STATE.adapters.move_to_end(name)
 
@@ -647,7 +697,7 @@ def op_generate(req: dict) -> dict:
     prompt = req.get("prompt")
     if not isinstance(prompt, str) or not prompt:
         raise SidecarError("INVALID_REQUEST", "generate requires non-empty prompt")
-    max_tokens = int(req.get("max_tokens", 512))
+    max_tokens = min(int(req.get("max_tokens", 512)), MAX_TOKENS_CEILING)
     temperature = float(req.get("temperature", 0.7))
     top_p = float(req.get("top_p", 0.95))
     messages = req.get("messages")
@@ -831,7 +881,15 @@ def op_base_fingerprint(req: dict) -> dict:
 def op_make_test_adapter(req: dict) -> dict:
     """Dev helper: write a valid mlx-lm LoRA adapter with random weights to out_dir.
     Requires a base to be loaded so we can derive shapes from lora-wrapped layers.
+
+    Writes to a request-controlled path, so it's gated behind SIDECAR_DEV=1 to
+    keep it out of normal (production) runs.
     """
+    if os.environ.get("SIDECAR_DEV") != "1":
+        raise SidecarError(
+            "DISABLED",
+            "make_test_adapter is a dev-only helper; set SIDECAR_DEV=1 to enable it",
+        )
     if STATE.model is None:
         raise SidecarError("BASE_NOT_LOADED", "load a base before creating a test adapter")
 
@@ -922,9 +980,18 @@ def handle(req: dict) -> None:
         _run_handler(req)
 
 
+# Reject absurdly large request frames so a malformed/newline-less stream
+# can't grow memory without bound. Generous enough for full message history
+# plus tool specs.
+MAX_FRAME_BYTES = 32 * 1024 * 1024
+
+
 def main() -> int:
     log("ready")
     for line in sys.stdin:
+        if len(line) > MAX_FRAME_BYTES:
+            emit({"id": None, "type": "error", "error": {"code": "INVALID_REQUEST", "message": f"request frame exceeds {MAX_FRAME_BYTES} bytes"}})
+            continue
         line = line.strip()
         if not line:
             continue

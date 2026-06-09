@@ -37,3 +37,44 @@ export async function requestCommandApproval(
   }
   return await requester(req);
 }
+
+// --- Generic action approval -------------------------------------------------
+// Same Promise+resolver bridge, but for non-command side-effecting tools that
+// must get explicit user confirmation before they run — e.g. Stripe money
+// movement. The handler builds a human-readable title/details; App.tsx renders
+// the same PermissionPrompt.
+
+export type ActionApprovalRequest = {
+  /** Short heading, e.g. "Approve refund?" */
+  title: string;
+  /** Exactly what will happen, e.g. "Refund $42.00 USD on charge ch_123". */
+  details: string;
+  /**
+   * When set, an "allow this session" option is offered and approvals are
+   * remembered under this key. OMIT for irreversible / money-moving actions so
+   * only "allow once" / "deny" are shown (no blanket session approval).
+   */
+  sessionKey?: string;
+};
+
+export type ActionApprovalRequester = (
+  req: ActionApprovalRequest,
+) => Promise<CommandApprovalDecision>;
+
+let actionRequester: ActionApprovalRequester | null = null;
+
+export function setActionApprovalRequester(
+  fn: ActionApprovalRequester | null,
+): void {
+  actionRequester = fn;
+}
+
+export async function requestActionApproval(
+  req: ActionApprovalRequest,
+): Promise<CommandApprovalDecision> {
+  if (!actionRequester) {
+    // Fail closed when the UI isn't mounted: never silently auto-approve.
+    return "denied";
+  }
+  return await actionRequester(req);
+}

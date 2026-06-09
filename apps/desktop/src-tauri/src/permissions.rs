@@ -54,8 +54,11 @@ pub const STANDARD_ALLOWLIST: &[&str] = &[
     "jq", "awk", "sed", "cut", "sort", "uniq", "diff",
 ];
 
-/// Commands that are denied even under Trusted until the live-prompt UI ships.
-/// Once prompts exist, these move to a "requires_prompt" list instead.
+/// Commands blocked outright under every preset. This is a guard-rail, not a
+/// hard security boundary: under Trusted, an allowlisted interpreter
+/// (`python -c`, `node -e`, …) can still spawn these, so treat the list as
+/// best-effort defense-in-depth rather than a guarantee. `has_interpreter_escape`
+/// closes the obvious interpreter holes under the Standard preset.
 pub const ALWAYS_DENY: &[&str] = &[
     "rm", "rmdir",
     "sudo", "su", "doas",
@@ -68,22 +71,80 @@ pub const ALWAYS_DENY: &[&str] = &[
     "ln",   // no user-created symlinks until we audit resolve_path behavior
 ];
 
-pub fn is_allowed_command(cmd: &str, preset: Preset) -> Result<(), String> {
+pub fn is_allowed_command(cmd: &str, args: &[String], preset: Preset) -> Result<(), String> {
     if preset == Preset::ReadOnly {
         return Err("run_command is not allowed under the Read-only preset".into());
     }
     let bare = cmd.split('/').last().unwrap_or(cmd);
     if ALWAYS_DENY.contains(&bare) {
-        return Err(format!(
-            "'{cmd}' is in the deny list and cannot run without a live confirmation (coming soon)"
-        ));
+        return Err(format!("'{cmd}' is in the deny list and cannot run"));
     }
-    if preset == Preset::Standard && !STANDARD_ALLOWLIST.contains(&bare) {
-        return Err(format!(
-            "'{cmd}' is not in the Standard preset allowlist; switch to Trusted"
-        ));
+    if preset == Preset::Standard {
+        if !STANDARD_ALLOWLIST.contains(&bare) {
+            return Err(format!(
+                "'{cmd}' is not in the Standard preset allowlist; switch to Trusted"
+            ));
+        }
+        // An allowlisted interpreter (python -c, node -e, find -exec, …) can run
+        // arbitrary code and thereby spawn ALWAYS_DENY binaries, defeating the
+        // point of the limited Standard set. Block those escapes here; they
+        // remain available under Trusted and via explicit user approval.
+        if let Some(reason) = has_interpreter_escape(cmd, args) {
+            return Err(format!(
+                "'{cmd}' is blocked under Standard ({reason}); switch to Trusted to allow it"
+            ));
+        }
     }
     Ok(())
+}
+
+/// Best-effort detection of "allowlisted interpreter used to execute arbitrary
+/// code/commands" — e.g. `python3 -c …`, `node -e …`, `find … -exec …`,
+/// `awk 'BEGIN{system("…")}'`, `git -c core.pager=… log`. Returns a short reason
+/// when the invocation is an escape, else `None`. Used only on the Standard
+/// auto-allow path (Trusted is arbitrary-by-design; an explicit approval shows
+/// the user the exact argv before running).
+pub fn has_interpreter_escape(cmd: &str, args: &[String]) -> Option<String> {
+    let bare = cmd.rsplit('/').next().unwrap_or(cmd);
+    let has_flag = |flags: &[&str]| args.iter().any(|a| flags.contains(&a.as_str()));
+    let has_flag_prefix = |prefixes: &[&str]| {
+        args.iter()
+            .any(|a| prefixes.iter().any(|p| a == p || a.starts_with(&format!("{p}="))))
+    };
+    match bare {
+        "python" | "python3" | "ruby" | "perl" | "php" => {
+            if has_flag(&["-c", "-e"]) {
+                return Some(format!("{bare} -c/-e executes arbitrary code"));
+            }
+        }
+        "node" | "deno" | "bun" => {
+            if has_flag(&["-e", "--eval", "-p", "--print", "--eval-file"]) {
+                return Some(format!("{bare} eval flag executes arbitrary code"));
+            }
+        }
+        "find" => {
+            if has_flag_prefix(&["-exec", "-execdir", "-ok", "-okdir", "-delete"]) {
+                return Some("find -exec/-delete runs arbitrary commands".into());
+            }
+        }
+        "awk" | "gawk" | "mawk" => {
+            if args
+                .iter()
+                .any(|a| a.contains("system(") || a.contains("|&") || a.contains("| \""))
+            {
+                return Some("awk system()/pipe runs arbitrary commands".into());
+            }
+        }
+        "git" => {
+            if has_flag(&["-c"])
+                || has_flag_prefix(&["--upload-pack", "--receive-pack", "--exec-path"])
+            {
+                return Some("git -c/--upload-pack can run arbitrary commands".into());
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 pub fn is_allowed_http(method: &str, preset: Preset) -> Result<(), String> {
@@ -161,39 +222,70 @@ pub async fn is_allowed_url(url: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn read_only_denies_all_commands() {
-        assert!(is_allowed_command("ls", Preset::ReadOnly).is_err());
+        assert!(is_allowed_command("ls", &[], Preset::ReadOnly).is_err());
     }
 
     #[test]
     fn standard_allows_allowlist() {
-        assert!(is_allowed_command("ls", Preset::Standard).is_ok());
-        assert!(is_allowed_command("git", Preset::Standard).is_ok());
+        assert!(is_allowed_command("ls", &[], Preset::Standard).is_ok());
+        assert!(is_allowed_command("git", &argv(&["status"]), Preset::Standard).is_ok());
     }
 
     #[test]
     fn standard_denies_offlist() {
-        assert!(is_allowed_command("curl", Preset::Standard).is_err());
-        assert!(is_allowed_command("wget", Preset::Standard).is_err());
+        assert!(is_allowed_command("curl", &[], Preset::Standard).is_err());
+        assert!(is_allowed_command("wget", &[], Preset::Standard).is_err());
     }
 
     #[test]
     fn trusted_allows_offlist() {
-        assert!(is_allowed_command("curl", Preset::Trusted).is_ok());
+        assert!(is_allowed_command("curl", &[], Preset::Trusted).is_ok());
     }
 
     #[test]
     fn always_deny_blocks_even_trusted() {
         for cmd in ["rm", "sudo", "shutdown"] {
-            assert!(is_allowed_command(cmd, Preset::Trusted).is_err(), "{cmd}");
+            assert!(is_allowed_command(cmd, &[], Preset::Trusted).is_err(), "{cmd}");
         }
     }
 
     #[test]
     fn always_deny_matches_basename() {
-        assert!(is_allowed_command("/bin/rm", Preset::Trusted).is_err());
-        assert!(is_allowed_command("/usr/bin/sudo", Preset::Trusted).is_err());
+        assert!(is_allowed_command("/bin/rm", &[], Preset::Trusted).is_err());
+        assert!(is_allowed_command("/usr/bin/sudo", &[], Preset::Trusted).is_err());
+    }
+
+    #[test]
+    fn standard_blocks_interpreter_escapes() {
+        // Allowlisted interpreters can't be used to run arbitrary code/commands
+        // under Standard.
+        assert!(is_allowed_command("python3", &argv(&["-c", "import os"]), Preset::Standard).is_err());
+        assert!(is_allowed_command("/usr/bin/python3", &argv(&["-c", "x"]), Preset::Standard).is_err());
+        assert!(is_allowed_command("node", &argv(&["-e", "1"]), Preset::Standard).is_err());
+        assert!(is_allowed_command("find", &argv(&[".", "-exec", "rm", "{}", "+"]), Preset::Standard).is_err());
+        assert!(is_allowed_command("awk", &argv(&["BEGIN{system(\"id\")}"]), Preset::Standard).is_err());
+        assert!(is_allowed_command("git", &argv(&["-c", "core.pager=sh -c id", "log"]), Preset::Standard).is_err());
+    }
+
+    #[test]
+    fn standard_allows_normal_interpreter_use() {
+        // Running a script file (not -c/-e) and a plain git command are fine.
+        assert!(is_allowed_command("python3", &argv(&["script.py"]), Preset::Standard).is_ok());
+        assert!(is_allowed_command("node", &argv(&["app.js"]), Preset::Standard).is_ok());
+        assert!(is_allowed_command("find", &argv(&[".", "-name", "*.rs"]), Preset::Standard).is_ok());
+    }
+
+    #[test]
+    fn trusted_allows_interpreter_escapes() {
+        // Trusted runs arbitrary commands by design.
+        assert!(is_allowed_command("python3", &argv(&["-c", "import os"]), Preset::Trusted).is_ok());
+        assert!(is_allowed_command("find", &argv(&[".", "-exec", "echo", "{}", "+"]), Preset::Trusted).is_ok());
     }
 
     #[test]

@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:* wss://localhost:* http://localhost:* https://api.search.brave.com https://html.duckduckgo.com https://huggingface.co https://*.hf.co https://cdn-lfs.hf.co; script-src 'self'"
+      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:* wss://localhost:* http://localhost:* https://api.search.brave.com https://html.duckduckgo.com https://huggingface.co https://*.hf.co https://cdn-lfs.hf.co; script-src 'self'"
     }
   },
   "bundle": {

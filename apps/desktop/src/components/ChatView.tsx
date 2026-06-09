@@ -232,15 +232,7 @@ export function ChatView({
   );
 }
 
-function MessageTurn({
-  message,
-  canRegenerate,
-  onRegenerate,
-  canStop,
-  onStop,
-  baseLabel,
-  showThinkingInline,
-}: {
+type MessageTurnProps = {
   message: Message;
   canRegenerate?: boolean;
   onRegenerate?: () => void;
@@ -248,7 +240,17 @@ function MessageTurn({
   onStop?: () => void;
   baseLabel: string;
   showThinkingInline: boolean;
-}) {
+};
+
+function MessageTurnImpl({
+  message,
+  canRegenerate,
+  onRegenerate,
+  canStop,
+  onStop,
+  baseLabel,
+  showThinkingInline,
+}: MessageTurnProps) {
   if (message.role === "system") {
     return (
       <TurnRow kind="system" title="system">
@@ -326,6 +328,22 @@ function MessageTurn({
     </TurnRow>
   );
 }
+
+// Memoized so streaming a reply only re-renders the row whose `message` object
+// actually changed (patchActiveChat preserves the identity of untouched
+// messages). The comparator ignores the inline `onRegenerate`/`onStop`
+// callbacks — they're recreated every render but their behavior is stable —
+// and compares the props that affect output. Without this, every token
+// re-runs the full markdown/highlight/katex pipeline for every message.
+const MessageTurn = React.memo(
+  MessageTurnImpl,
+  (prev: MessageTurnProps, next: MessageTurnProps) =>
+    prev.message === next.message &&
+    prev.canRegenerate === next.canRegenerate &&
+    prev.canStop === next.canStop &&
+    prev.baseLabel === next.baseLabel &&
+    prev.showThinkingInline === next.showThinkingInline,
+);
 
 function ToolTurn({ message }: { message: ToolCallMessage }) {
   return (
