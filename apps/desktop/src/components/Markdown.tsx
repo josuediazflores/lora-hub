@@ -1,3 +1,4 @@
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -79,7 +80,15 @@ const COMPONENTS = {
   hr: () => <hr className="my-3 border-app-border" />,
 };
 
-export function Markdown({ children }: { children: string }) {
+// Memoized on the markdown string: re-running the remark/rehype-highlight/katex
+// pipeline is the expensive part of a chat re-render, so skip it when the body
+// text is unchanged (same-string props are the common case once memoized rows
+// stop the streaming row from re-rendering its neighbours).
+export const Markdown = memo(function Markdown({
+  children,
+}: {
+  children: string;
+}) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
@@ -92,4 +101,4 @@ export function Markdown({ children }: { children: string }) {
       {children}
     </ReactMarkdown>
   );
-}
+});

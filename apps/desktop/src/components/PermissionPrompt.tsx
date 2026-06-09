@@ -6,6 +6,9 @@ type Props = {
   onAllowOnce: () => void;
   onAllowSession: () => void;
   onDeny: () => void;
+  /** When false, the "allow this session" button is hidden — used for
+   * irreversible / money-moving actions that should be confirmed every time. */
+  allowSession?: boolean;
 };
 
 /**
@@ -19,6 +22,7 @@ export function PermissionPrompt({
   onAllowOnce,
   onAllowSession,
   onDeny,
+  allowSession = true,
 }: Props) {
   return (
     <div className="rounded-md border border-app-accent/40 bg-app-accent/[0.06] p-3">
@@ -37,13 +41,15 @@ export function PermissionPrompt({
         >
           allow once
         </button>
-        <button
-          type="button"
-          onClick={onAllowSession}
-          className="rounded-md border border-app-accent/50 px-3 py-1 text-app-accent hover:bg-app-accent/10"
-        >
-          allow this session
-        </button>
+        {allowSession && (
+          <button
+            type="button"
+            onClick={onAllowSession}
+            className="rounded-md border border-app-accent/50 px-3 py-1 text-app-accent hover:bg-app-accent/10"
+          >
+            allow this session
+          </button>
+        )}
         <button
           type="button"
           onClick={onDeny}

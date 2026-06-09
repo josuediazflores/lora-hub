@@ -54,3 +54,19 @@ CREATE TABLE adapter_versions (
 CREATE INDEX idx_adapters_base_sha ON adapters(base_sha);
 CREATE INDEX idx_adapters_downloads ON adapters(downloads DESC);
 CREATE INDEX idx_versions_slug ON adapter_versions(slug);
+
+-- Auto-updater feed. One row per published artifact per (channel, target_arch).
+-- The /updates/* worker route serves the row with the highest version that
+-- is greater than the requesting client's current version.
+DROP TABLE IF EXISTS updates;
+CREATE TABLE updates (
+  channel TEXT NOT NULL,                    -- 'stable' | 'beta'
+  target_arch TEXT NOT NULL,                -- 'darwin-aarch64' | 'darwin-x86_64' | …
+  version TEXT NOT NULL,                    -- semver of the artifact
+  pub_date TEXT NOT NULL,                   -- ISO-8601
+  notes TEXT,                               -- markdown release notes
+  url TEXT NOT NULL,                        -- direct download URL (.tar.gz / .app.tar.gz / .msi.zip)
+  signature TEXT NOT NULL,                  -- minisign signature emitted by `tauri build`
+  PRIMARY KEY (channel, target_arch, version)
+);
+CREATE INDEX idx_updates_channel_target ON updates(channel, target_arch, pub_date DESC);

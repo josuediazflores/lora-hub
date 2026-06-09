@@ -1,6 +1,25 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ToolDef } from "./sidecar";
 import { listMemories, type Memory } from "./memory";
+import { useChatStore } from "./chat-store";
+import {
+  requestCommandApproval,
+  requestActionApproval,
+} from "./permission-bridge";
+
+/**
+ * Money-moving Stripe tools require explicit per-call user confirmation before
+ * they run — mirroring the run_command approval. There is intentionally no
+ * `sessionKey`, so there's no "allow this session" blanket approval: every
+ * money operation re-prompts. Returns true when the user approves.
+ */
+async function confirmStripeAction(
+  title: string,
+  details: string,
+): Promise<boolean> {
+  const decision = await requestActionApproval({ title, details });
+  return decision !== "denied";
+}
 
 /**
  * Tool registry passed to the sidecar so the model sees a compact spec of
@@ -253,6 +272,345 @@ export const TOOL_DEFS: ToolDef[] = [
     },
   },
   {
+    name: "parse_receipt",
+    description:
+      "OCR a receipt photo into raw text + heuristic line items. Use FIRST when the user uploads a " +
+      "receipt image and asks to split it. Returns {raw_text, suggested_items: [{name, price}]}. " +
+      "After this, refine the suggested items into a clean list and call split_bill. Requires " +
+      "tesseract installed locally (brew install tesseract on macOS).",
+    parameters: {
+      image_path: {
+        type: "string",
+        required: true,
+        description: "Absolute filesystem path to a JPEG/PNG receipt image.",
+      },
+    },
+  },
+  {
+    name: "split_bill",
+    description:
+      "Compute per-person totals from itemized assignments. Pure math, no API calls. Use AFTER " +
+      "parse_receipt (or when the user gives items + people directly). " +
+      "items[i].price is in MAJOR units (dollars), not minor units. " +
+      "assignments maps item index (as a string) OR item name to a list of person names; '*' means " +
+      "everyone. Items with no assignment default to '*'. " +
+      "tip_strategy: 'even' (split equally) or 'proportional' (by subtotal). " +
+      "Pass `description` (e.g. \"Dinner at Mama's\") so downstream cards / payment links can label themselves. " +
+      "Returns {per_person: [{name, subtotal, tax, tip, total}], grand_total, description}. " +
+      "AFTER THIS RETURNS, the rendered card has its own 'Create payment links' button — you don't need to " +
+      "auto-call create_split_payment_links. Just describe the split in one short sentence and let the user click.",
+    parameters: {
+      items: {
+        type: "array",
+        required: true,
+        description: "Array of {name, price} where price is in major units (dollars).",
+      },
+      people: {
+        type: "array",
+        required: true,
+        description: "Full list of participant names (case-sensitive).",
+      },
+      assignments: {
+        type: "object",
+        required: false,
+        description:
+          "Map of item index (string) or name to list of person names. '*' = everyone.",
+      },
+      tip: {
+        type: "number",
+        required: false,
+        description: "Tip amount in major units (dollars). Defaults to 0.",
+      },
+      tax: {
+        type: "number",
+        required: false,
+        description: "Tax amount in major units (dollars). Defaults to 0.",
+      },
+      tip_strategy: {
+        type: "string",
+        required: false,
+        description: "'even' (default) | 'proportional'.",
+      },
+      tax_strategy: {
+        type: "string",
+        required: false,
+        description: "'proportional' (default) | 'even'.",
+      },
+      description: {
+        type: "string",
+        required: false,
+        description: "Short label for the bill (e.g. \"Dinner at Mama's\"). Echoed back so cards can use it.",
+      },
+    },
+  },
+  {
+    name: "create_split_payment_links",
+    description:
+      "USE THIS (not create_payment_link) whenever there are multiple payers. Creates one Stripe " +
+      "Payment Link per payer, each tagged with metadata.split_id so split_status can attribute " +
+      "payments back. Calling create_payment_link N times is WRONG — those won't share a split_id, " +
+      "and split_status will return nothing. Use AFTER split_bill, passing through its per_person " +
+      "array. per_person[i].total is MAJOR units (dollars). Returns {split_id, currency, links: " +
+      "[{name, url, id, amount}]} where amount is minor units. Test mode only.",
+    parameters: {
+      per_person: {
+        type: "array",
+        required: true,
+        description: "Array of {name, total} from split_bill (totals in major units).",
+      },
+      description: {
+        type: "string",
+        required: true,
+        description: "Shown on each Stripe Checkout page, e.g. \"Dinner at Mama's\".",
+      },
+      currency: {
+        type: "string",
+        required: false,
+        description: "ISO 4217 lowercase. Defaults to 'usd'.",
+      },
+      split_id: {
+        type: "string",
+        required: false,
+        description: "Optional caller-supplied id; auto-generated if omitted.",
+      },
+    },
+  },
+  {
+    name: "send_payment_requests",
+    description:
+      "Build prefilled SMS / email / clipboard messages for each payer. Does NOT send anything itself — " +
+      "returns URI handlers (sms:..., mailto:...) that the frontend renders as clickable links. " +
+      "channel: 'sms' | 'email' | 'clipboard'. requests[i] = {name, contact?, url, amount}.",
+    parameters: {
+      channel: {
+        type: "string",
+        required: true,
+        description: "'sms' | 'email' | 'clipboard'.",
+      },
+      requests: {
+        type: "array",
+        required: true,
+        description: "Array of {name, contact?, url, amount} (amount in minor units).",
+      },
+      description: {
+        type: "string",
+        required: false,
+        description: "Bill description used in the message body.",
+      },
+    },
+  },
+  {
+    name: "split_status",
+    description:
+      "Poll Stripe for charges tagged with this split_id and report who has paid. Use after " +
+      "create_split_payment_links to check progress, or whenever the user asks 'who paid yet?'. " +
+      "Returns {split_id, paid: [{name, amount, paid_at, charge_id}]}.",
+    parameters: {
+      split_id: {
+        type: "string",
+        required: true,
+        description: "split_id from create_split_payment_links's response.",
+      },
+      limit: {
+        type: "number",
+        required: false,
+        description: "How many recent charges to scan (1–100, default 50).",
+      },
+    },
+  },
+  {
+    name: "create_payment_link",
+    description:
+      "ONE-OFF single-payer payment links only. DO NOT use for splitting a bill across multiple " +
+      "people — for that, use create_split_payment_links after split_bill. Use this when the user " +
+      "asks for a single payment URL for a single product/charge (e.g. 'a $20 link for a coffee " +
+      "subscription'). Amount is INTEGER MINOR UNITS (e.g. 2000 = $20.00 for USD); never pass " +
+      "dollars. Currency is ISO 4217 lowercase (e.g. 'usd'). Expects a sk_test_… key during " +
+      "development — every call mutates real Stripe state. Returns {url, id, amount, currency}.",
+    parameters: {
+      amount: {
+        type: "number",
+        required: true,
+        description: "Integer minor units (e.g. 2000 = $20.00 for USD).",
+      },
+      currency: {
+        type: "string",
+        required: true,
+        description: "ISO 4217 lowercase, e.g. 'usd'.",
+      },
+      description: {
+        type: "string",
+        required: true,
+        description: "Product name shown on the Stripe checkout page.",
+      },
+    },
+  },
+  {
+    name: "create_invoice",
+    description:
+      "Create, finalize, and email a Stripe invoice to a customer. Use when the user " +
+      "asks to bill a customer by email. Per-item amount is INTEGER MINOR UNITS. " +
+      "Expects a sk_test_… key during development — every call mutates real Stripe " +
+      "state and sends an email. Returns {id, hosted_invoice_url, amount_due, status}.",
+    parameters: {
+      customer_email: {
+        type: "string",
+        required: true,
+        description: "Email of the customer to bill (created if not found).",
+      },
+      line_items: {
+        type: "array",
+        required: true,
+        description:
+          "Array of {description, amount, quantity?, currency?}. amount is integer minor units.",
+      },
+      due_date: {
+        type: "string",
+        required: true,
+        description: "Due date in YYYY-MM-DD (UTC).",
+      },
+    },
+  },
+  {
+    name: "list_transactions",
+    description:
+      "List the most recent Stripe charges. Read-only. Use when the user asks to see " +
+      "recent payments / transactions / charges. Default 10, max 100. Returns " +
+      "{charges: [{id, amount, currency, status, description, created}]}.",
+    parameters: {
+      limit: {
+        type: "number",
+        required: false,
+        description: "Number of charges to return (1–100, default 10).",
+      },
+    },
+  },
+  {
+    name: "create_subscription",
+    description:
+      "Create a recurring Stripe subscription. Use when the user asks to subscribe a customer to a recurring " +
+      "charge (e.g. monthly/yearly billing). Auto-creates a fresh customer with a Stripe TEST CLOCK and " +
+      "pm_card_visa attached, so the subscription is immediately ACTIVE and can be fast-forwarded later via " +
+      "advance_test_clock. Amount is INTEGER MINOR UNITS per interval (2000 = $20.00 USD). " +
+      "Test mode only. Returns {id, customer_id, customer_email, test_clock_id, amount, currency, interval, " +
+      "interval_count, status, current_period_end, latest_invoice_url}.",
+    parameters: {
+      customer_email: { type: "string", required: true, description: "Email of the customer to bill." },
+      amount: {
+        type: "number",
+        required: true,
+        description: "Recurring amount per interval, integer minor units (e.g. 2000 = $20.00 USD).",
+      },
+      currency: {
+        type: "string",
+        required: false,
+        description: "ISO 4217 lowercase, e.g. 'usd'. Defaults to 'usd'.",
+      },
+      interval: {
+        type: "string",
+        required: false,
+        description: "'day' | 'week' | 'month' | 'year'. Defaults to 'month'.",
+      },
+      interval_count: {
+        type: "number",
+        required: false,
+        description: "Multiplier on interval (e.g. interval='month' + interval_count=3 → quarterly).",
+      },
+      description: {
+        type: "string",
+        required: false,
+        description: "Product name shown on invoices.",
+      },
+    },
+  },
+  {
+    name: "list_subscriptions",
+    description:
+      "List recent Stripe subscriptions across all statuses (active, canceled, past_due, etc.). " +
+      "Read-only. Includes test-clock subscriptions (which Stripe excludes from default listings). " +
+      "Returns {subscriptions: [{id, customer_email, amount, currency, interval, status, " +
+      "current_period_end, test_clock_id}]}.",
+    parameters: {
+      limit: {
+        type: "number",
+        required: false,
+        description: "Number of subscriptions to return (1–100, default 10).",
+      },
+    },
+  },
+  {
+    name: "cancel_subscription",
+    description:
+      "Cancel a Stripe subscription. Default cancels immediately; pass immediately=false to cancel at " +
+      "the end of the current billing period. Returns {id, status, canceled_at, cancel_at_period_end}.",
+    parameters: {
+      subscription_id: {
+        type: "string",
+        required: true,
+        description: "Stripe subscription id, e.g. 'sub_…'.",
+      },
+      immediately: {
+        type: "boolean",
+        required: false,
+        description: "True (default) cancels immediately; false sets cancel_at_period_end.",
+      },
+    },
+  },
+  {
+    name: "advance_test_clock",
+    description:
+      "Fast-forward a Stripe TEST CLOCK by N months (1–24) to simulate billing cycles passing. Use after " +
+      "create_subscription if the user asks to 'simulate a year of billing', 'fast-forward 6 months', etc. " +
+      "NON-BLOCKING: returns immediately with status='advancing'. After calling, poll get_test_clock until " +
+      "status='ready' (typically 5–60s for 1mo, 60–120s for 12mo), then re-call list_subscriptions and " +
+      "list_transactions to see the simulated cycles. Returns {clock_id, frozen_time, status}.",
+    parameters: {
+      clock_id: {
+        type: "string",
+        required: true,
+        description: "Test clock id from create_subscription's response, e.g. 'clock_…'.",
+      },
+      by_months: {
+        type: "number",
+        required: false,
+        description: "Months to advance (1–24, default 1).",
+      },
+    },
+  },
+  {
+    name: "get_test_clock",
+    description:
+      "Read current state of a Stripe test clock. Use to poll after advance_test_clock until status='ready'. " +
+      "Returns {clock_id, frozen_time, status}, where status is 'ready' | 'advancing' | 'internal_failure'.",
+    parameters: {
+      clock_id: {
+        type: "string",
+        required: true,
+        description: "Test clock id, e.g. 'clock_…'.",
+      },
+    },
+  },
+  {
+    name: "refund_payment",
+    description:
+      "Refund a Stripe charge in full (omit amount) or partially (integer minor units). " +
+      "Use when the user asks to refund a specific charge by id. Expects a sk_test_… " +
+      "key during development — refunds mutate real Stripe state. Returns " +
+      "{id, amount, status}.",
+    parameters: {
+      charge_id: {
+        type: "string",
+        required: true,
+        description: "Stripe charge id, e.g. 'ch_…'.",
+      },
+      amount: {
+        type: "number",
+        required: false,
+        description: "Partial refund amount in integer minor units. Omit for full refund.",
+      },
+    },
+  },
+  {
     name: "web_search",
     description:
       "Search the web. Returns up to 10 hits as {title, url, snippet}. " +
@@ -434,18 +792,16 @@ export const TOOL_DEFS: ToolDef[] = [
 ];
 
 /** Pulled at call-time so the running agent picks up a freshly-changed
- * provider / key without a restart. */
+ * provider / key without a restart. Reads from the live settings store — the
+ * previous implementation read a dead `lora-hub:settings:v1` localStorage key
+ * (settings moved into the zustand store), so the user's provider/key choice
+ * was silently ignored and search always fell back to DuckDuckGo. */
 function readSearchConfig(): { provider: string; apiKey: string } {
   try {
-    const raw = localStorage.getItem("lora-hub:settings:v1");
-    if (!raw) return { provider: "duckduckgo", apiKey: "" };
-    const parsed = JSON.parse(raw) as {
-      searchProvider?: string;
-      braveApiKey?: string;
-    };
+    const s = useChatStore.getState().settings;
     return {
-      provider: parsed.searchProvider ?? "duckduckgo",
-      apiKey: (parsed.braveApiKey ?? "").trim(),
+      provider: s.searchProvider ?? "duckduckgo",
+      apiKey: (s.braveApiKey ?? "").trim(),
     };
   } catch {
     return { provider: "duckduckgo", apiKey: "" };
@@ -550,25 +906,60 @@ export async function runTool(
         };
       }
       case "run_command": {
-        // TODO(security): wire PermissionPrompt for non-allowlisted commands
-        // so the Standard preset asks for explicit user approval before
-        // running anything outside permissions.rs's curated allowlist. The
-        // component (apps/desktop/src/components/PermissionPrompt.tsx)
-        // already exists; just needs an event channel from the backend
-        // when is_allowed_command would otherwise reject.
-        const result = await invoke<CommandResult>("tool_run_command", {
-          cmd: args.cmd,
-          args: (args.args as unknown[] | undefined) ?? [],
-          cwd: args.cwd ?? null,
-        });
-        const parts = [`exit ${result.exit_code}`];
-        if (result.stdout) parts.push(`stdout:\n${result.stdout}`);
-        if (result.stderr) parts.push(`stderr:\n${result.stderr}`);
-        return {
-          status: "success",
-          output: parts.join("\n\n"),
-          truncated: result.truncated,
-        };
+        const cmdArgs = ((args.args as unknown[] | undefined) ?? []).map((a) =>
+          String(a),
+        );
+        const cwd = (args.cwd as string | undefined) ?? null;
+        const cmd = String(args.cmd ?? "");
+        try {
+          const result = await invoke<CommandResult>("tool_run_command", {
+            cmd,
+            args: cmdArgs,
+            cwd,
+          });
+          const parts = [`exit ${result.exit_code}`];
+          if (result.stdout) parts.push(`stdout:\n${result.stdout}`);
+          if (result.stderr) parts.push(`stderr:\n${result.stderr}`);
+          return {
+            status: "success",
+            output: parts.join("\n\n"),
+            truncated: result.truncated,
+          };
+        } catch (e) {
+          // Allowlist denials surface from is_allowed_command in
+          // src-tauri/src/permissions.rs. We pattern-match the exact error
+          // text that helper produces ("not in the … allowlist" /
+          // "not allowed under the Read-only preset"). ALWAYS_DENY hits
+          // ("in the deny list") are *not* upgradeable — surface them as-is.
+          const msg = String(e);
+          const upgradeable =
+            /not in the .* allowlist/i.test(msg) ||
+            /not allowed under the Read-only preset/i.test(msg);
+          if (!upgradeable) {
+            return { status: "error", error: msg };
+          }
+          const decision = await requestCommandApproval({
+            cmd,
+            args: cmdArgs,
+            cwd,
+            reason: msg,
+          });
+          if (decision === "denied") {
+            return { status: "denied", error: msg };
+          }
+          const result = await invoke<CommandResult>(
+            "tool_run_command_approved",
+            { cmd, args: cmdArgs, cwd, scope: decision },
+          );
+          const parts = [`exit ${result.exit_code}`];
+          if (result.stdout) parts.push(`stdout:\n${result.stdout}`);
+          if (result.stderr) parts.push(`stderr:\n${result.stderr}`);
+          return {
+            status: "success",
+            output: parts.join("\n\n"),
+            truncated: result.truncated,
+          };
+        }
       }
       case "http_fetch": {
         const response = await invoke<HttpResponseRaw>("tool_http_fetch", {
@@ -683,6 +1074,244 @@ export async function runTool(
           });
           const dates = adaptFliDates(fliResult, args);
           return { status: "success", output: JSON.stringify(dates) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "create_payment_link": {
+        try {
+          const approved = await confirmStripeAction(
+            "Approve payment link?",
+            `Create a Stripe payment link\n\namount: ${String(args.amount)} ${String(args.currency ?? "usd").toUpperCase()}\ndescription: ${String(args.description ?? "")}`,
+          );
+          if (!approved)
+            return { status: "denied", error: "Payment link was not approved." };
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "create_payment_link",
+            args: {
+              amount: args.amount,
+              currency: args.currency,
+              description: args.description,
+            },
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "create_invoice": {
+        try {
+          const approved = await confirmStripeAction(
+            "Approve invoice?",
+            `Create & send a Stripe invoice\n\nto: ${String(args.customer_email ?? "")}\nitems: ${JSON.stringify(args.line_items ?? [])}\ndue: ${String(args.due_date ?? "—")}`,
+          );
+          if (!approved)
+            return { status: "denied", error: "Invoice was not approved." };
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "create_invoice",
+            args: {
+              customer_email: args.customer_email,
+              line_items: args.line_items,
+              due_date: args.due_date,
+            },
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "list_transactions": {
+        try {
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "list_transactions",
+            args: { limit: args.limit ?? 10 },
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "refund_payment": {
+        try {
+          const stripeArgs: Record<string, unknown> = {
+            charge_id: args.charge_id,
+          };
+          if (args.amount != null) stripeArgs.amount = args.amount;
+          const approved = await confirmStripeAction(
+            "Approve refund?",
+            `Refund a Stripe charge\n\ncharge: ${String(args.charge_id ?? "")}\namount: ${args.amount != null ? String(args.amount) : "full"}`,
+          );
+          if (!approved)
+            return { status: "denied", error: "Refund was not approved." };
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "refund_payment",
+            args: stripeArgs,
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "create_subscription": {
+        try {
+          const subArgs: Record<string, unknown> = {
+            customer_email: args.customer_email,
+            amount: args.amount,
+          };
+          if (args.currency) subArgs.currency = args.currency;
+          if (args.interval) subArgs.interval = args.interval;
+          if (args.interval_count != null) subArgs.interval_count = args.interval_count;
+          if (args.description) subArgs.description = args.description;
+          const approved = await confirmStripeAction(
+            "Approve subscription?",
+            `Create a Stripe subscription\n\ncustomer: ${String(args.customer_email ?? "")}\namount: ${String(args.amount)} ${String(args.currency ?? "usd").toUpperCase()} / ${String(args.interval ?? "month")}`,
+          );
+          if (!approved)
+            return { status: "denied", error: "Subscription was not approved." };
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "create_subscription",
+            args: subArgs,
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "list_subscriptions": {
+        try {
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "list_subscriptions",
+            args: { limit: args.limit ?? 10 },
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "cancel_subscription": {
+        try {
+          const cancelArgs: Record<string, unknown> = {
+            subscription_id: args.subscription_id,
+          };
+          if (args.immediately != null) cancelArgs.immediately = args.immediately;
+          const approved = await confirmStripeAction(
+            "Approve cancellation?",
+            `Cancel a Stripe subscription\n\nsubscription: ${String(args.subscription_id ?? "")}\nimmediately: ${String(args.immediately ?? false)}`,
+          );
+          if (!approved)
+            return { status: "denied", error: "Cancellation was not approved." };
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "cancel_subscription",
+            args: cancelArgs,
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "advance_test_clock": {
+        try {
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "advance_test_clock",
+            args: {
+              clock_id: args.clock_id,
+              by_months: args.by_months ?? 1,
+            },
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "get_test_clock": {
+        try {
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "get_test_clock",
+            args: { clock_id: args.clock_id },
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "parse_receipt": {
+        try {
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "parse_receipt",
+            args: { image_path: args.image_path },
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "split_bill": {
+        try {
+          const splitArgs: Record<string, unknown> = {
+            items: args.items,
+            people: args.people,
+          };
+          if (args.assignments) splitArgs.assignments = args.assignments;
+          if (args.tip != null) splitArgs.tip = args.tip;
+          if (args.tax != null) splitArgs.tax = args.tax;
+          if (args.tip_strategy) splitArgs.tip_strategy = args.tip_strategy;
+          if (args.tax_strategy) splitArgs.tax_strategy = args.tax_strategy;
+          if (args.description) splitArgs.description = args.description;
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "split_bill",
+            args: splitArgs,
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "create_split_payment_links": {
+        try {
+          const linkArgs: Record<string, unknown> = {
+            per_person: args.per_person,
+            description: args.description,
+          };
+          if (args.currency) linkArgs.currency = args.currency;
+          if (args.split_id) linkArgs.split_id = args.split_id;
+          const approved = await confirmStripeAction(
+            "Approve payment links?",
+            `Create Stripe payment links for a bill split\n\nper_person: ${JSON.stringify(args.per_person ?? [])}\ndescription: ${String(args.description ?? "")}`,
+          );
+          if (!approved)
+            return { status: "denied", error: "Payment links were not approved." };
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "create_split_payment_links",
+            args: linkArgs,
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "send_payment_requests": {
+        try {
+          const sendArgs: Record<string, unknown> = {
+            channel: args.channel,
+            requests: args.requests,
+          };
+          if (args.description) sendArgs.description = args.description;
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "send_payment_requests",
+            args: sendArgs,
+          });
+          return { status: "success", output: decodeStripe(r) };
+        } catch (e) {
+          return { status: "error", error: stringifyFliError(e) };
+        }
+      }
+      case "split_status": {
+        try {
+          const r = await invoke<StripeMcpResult>("mcp_stripe_call", {
+            toolName: "split_status",
+            args: { split_id: args.split_id, limit: args.limit ?? 50 },
+          });
+          return { status: "success", output: decodeStripe(r) };
         } catch (e) {
           return { status: "error", error: stringifyFliError(e) };
         }
@@ -996,6 +1625,27 @@ function buildGoogleFlightsUrl(
     dep ? `+on+${dep}` : ""
   }${r ? `+returning+${r}` : ""}`;
   return base + q;
+}
+
+/** stripe-mcp `tools/call` response envelope (same shape as fli-mcp). */
+type StripeMcpResult = {
+  content?: { type: string; text?: string }[];
+  structuredContent?: unknown;
+  isError?: boolean;
+};
+
+/** Pull the JSON body out of a stripe-mcp response and return it as-is.
+ * The model sees the raw JSON string (including any {error: …} envelope from
+ * the Python wrappers — they catch StripeError so we don't fall into the
+ * MCP isError path). */
+function decodeStripe(result: StripeMcpResult): string {
+  if (result.isError) {
+    return result.content?.[0]?.text ?? "unknown stripe error";
+  }
+  const text = result.content?.[0]?.text;
+  if (text) return text;
+  if (result.structuredContent) return JSON.stringify(result.structuredContent);
+  return "{}";
 }
 
 function stringifyFliError(e: unknown): string {

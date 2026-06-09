@@ -9,11 +9,14 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::{AppHandle, Manager};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex};
 use tokio::time::timeout;
+
+use crate::audit;
 
 /// fli-mcp can return JSON payloads larger than 64KiB (one line of the
 /// `search_flights` response often exceeds 100KiB). Give the stdio reader
@@ -264,4 +267,84 @@ pub async fn mcp_fli_call(
         .call_tool(&tool_name, args)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Resolve the path to `stripe-mcp` installed by pipx. Falls back to PATH lookup.
+pub fn resolve_stripe_mcp() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        let local = PathBuf::from(home)
+            .join(".local")
+            .join("bin")
+            .join("stripe-mcp");
+        if local.exists() {
+            return Some(local);
+        }
+    }
+    which("stripe-mcp")
+}
+
+/// Tauri state wrapper that lazily spawns the stripe-mcp client on first use.
+pub struct StripeMcpState {
+    inner: Mutex<Option<Arc<McpClient>>>,
+}
+
+impl StripeMcpState {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+
+    pub async fn get_or_init(&self) -> Result<Arc<McpClient>, McpError> {
+        let mut guard = self.inner.lock().await;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        let path = resolve_stripe_mcp().ok_or_else(|| {
+            McpError::Protocol(
+                "stripe-mcp not found — install with 'pipx install stripe-mcp' \
+                 (or 'pipx install ./mcp/stripe-mcp' from the repo)"
+                    .into(),
+            )
+        })?;
+        let client = McpClient::spawn(path).await?;
+        *guard = Some(client.clone());
+        Ok(client)
+    }
+}
+
+#[tauri::command]
+pub async fn mcp_stripe_call(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<StripeMcpState>>,
+    tool_name: String,
+    args: Value,
+) -> Result<Value, String> {
+    // Stripe tools can move real money, so every call is recorded in the audit
+    // log (mirroring the bracket used by the filesystem/shell tools). The arg
+    // summary is shape-only — the tool name plus which argument keys were
+    // present — so amounts/PII aren't persisted verbatim.
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let arg_keys: Vec<String> = args
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    let args_summary = json!({ "tool": tool_name, "arg_keys": arg_keys }).to_string();
+    let ctx = audit::start_log(&data_dir, "stripe_call", "mcp", None, &args_summary)?;
+
+    let result = async {
+        let client = state.get_or_init().await.map_err(|e| e.to_string())?;
+        client
+            .call_tool(&tool_name, args)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    .await;
+
+    let (status, bytes) = match &result {
+        Ok(v) => ("success", v.to_string().len()),
+        Err(_) => ("error", 0),
+    };
+    audit::end_log(&data_dir, &ctx, status, bytes);
+    result
 }

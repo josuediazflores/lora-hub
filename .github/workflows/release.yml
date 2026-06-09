@@ -1,0 +1,104 @@
+name: Release desktop app
+
+# Triggers on tag push (vX.Y.Z) or manual dispatch. Builds the Tauri app on
+# macos-14 (Apple Silicon), bundles the Python sidecar, and uploads the
+# resulting .dmg + updater artifacts as a draft GitHub Release.
+#
+# Code-signing + notarization happen only when the relevant secrets are
+# present (Milestone B). Without them the .dmg is unsigned but still produced
+# so you can smoke-test the bundle locally before paying for a Developer ID.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel"
+        type: choice
+        options: [stable, beta]
+        default: stable
+
+permissions:
+  contents: write   # needed to create the draft release
+
+jobs:
+  build-macos:
+    runs-on: macos-14   # Apple Silicon
+    timeout-minutes: 60
+    env:
+      CHANNEL: ${{ github.event.inputs.channel || 'stable' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock') }}
+
+      - name: Cache python-build-standalone tarball
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/lora-hub-bundle-cache
+          key: ${{ runner.os }}-pbs-${{ hashFiles('scripts/bundle-sidecar.sh', 'sidecar/requirements.txt') }}
+        env:
+          # bundle-sidecar.sh defaults TMPDIR-based cache; pin it to the runner temp.
+          TMPDIR: ${{ runner.temp }}
+
+      - name: Install npm deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Bundle sidecar
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: bash scripts/bundle-sidecar.sh
+
+      - name: Build (release)
+        working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_KEY_PASSWORD }}
+          # Apple Developer signing — wire these once Milestone B is unblocked.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: npm run tauri build
+
+      - name: Stage release artifacts
+        run: |
+          mkdir -p release-artifacts
+          cp apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg release-artifacts/ 2>/dev/null || true
+          cp apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz release-artifacts/ 2>/dev/null || true
+          cp apps/desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig release-artifacts/ 2>/dev/null || true
+          ls -la release-artifacts/
+
+      - name: Upload artifacts (workflow run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-aarch64-${{ github.ref_name || 'manual' }}
+          path: release-artifacts/
+
+      - name: Create draft GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release-artifacts/*

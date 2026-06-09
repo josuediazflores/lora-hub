@@ -165,9 +165,21 @@ impl Sidecar {
 
 /// Resolve where the python interpreter and sidecar script live.
 ///
-/// Dev: repo's `sidecar/.venv/bin/python` + `sidecar/mlx_server.py`.
-/// Packaged: bundled python-build-standalone in resource_dir (Phase 2).
+/// Production: bundled python-build-standalone under the app's resource_dir,
+/// produced by `scripts/bundle-sidecar.sh`. We prefer this whenever it exists
+/// so a packaged app never falls through to a developer's repo venv by accident.
+///
+/// Dev fallback: repo's `sidecar/.venv/bin/python` + `sidecar/mlx_server.py`.
+/// Only used in debug builds when the bundle hasn't been generated yet.
 fn resolve_sidecar_paths(app: &AppHandle) -> (PathBuf, PathBuf) {
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let bundled_py = resource_dir.join("python").join("bin").join("python3");
+        let bundled_script = resource_dir.join("sidecar").join("mlx_server.py");
+        if bundled_py.exists() && bundled_script.exists() {
+            return (bundled_py, bundled_script);
+        }
+    }
+
     #[cfg(debug_assertions)]
     {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -187,6 +199,9 @@ fn resolve_sidecar_paths(app: &AppHandle) -> (PathBuf, PathBuf) {
             }
         }
     }
+
+    // Last resort — return the expected bundled paths. spawn() will surface a
+    // clear ENOENT and the user will see "sidecar missing — reinstall the app".
     let resource_dir = app
         .path()
         .resource_dir()

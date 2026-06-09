@@ -24,7 +24,10 @@ use rusqlite::Connection;
 /// Bundled migration files. Each entry is `(version, sql)` and must be in
 /// strictly increasing version order. To add a new migration, drop a file
 /// in `src-tauri/migrations/` and append it here.
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/001_initial.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/001_initial.sql")),
+    (2, include_str!("../migrations/002_chat_index.sql")),
+];
 
 /// Pool-backed SQLite handle. Cheap to clone is not required — we store this
 /// in Tauri-managed state and hand out `&State<'_, Database>` to commands,

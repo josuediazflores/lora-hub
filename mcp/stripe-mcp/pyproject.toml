@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stripe-mcp"
+version = "0.1.0"
+description = "Local MCP server exposing Stripe actions as tools for on-device LLMs (lora-hub)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=1.0.0",
+  "stripe>=10.0.0",
+  "pydantic>=2",
+  "python-dateutil>=2.8",
+  "pytesseract>=0.3",
+  "Pillow>=10",
+]
+
+[project.scripts]
+stripe-mcp = "stripe_mcp.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stripe_mcp"]

@@ -21,6 +21,49 @@ import {
 
 const STORE_KEY = "lora-hub:chat-store:v1";
 
+/**
+ * A localStorage-backed StateStorage whose writes are debounced. zustand's
+ * persist middleware calls setItem on every `set()` — i.e. on every streamed
+ * token — which means a full JSON.stringify of the entire chat history per
+ * token. Debouncing collapses that into at most one write per `delayMs`; the
+ * latest pending write is flushed on `beforeunload` so nothing is lost on a
+ * normal quit. Reads stay synchronous and always reflect the newest value.
+ */
+function debouncedLocalStorage(delayMs: number) {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const pending = new Map<string, string>();
+  const flush = () => {
+    for (const [k, v] of pending) {
+      try {
+        localStorage.setItem(k, v);
+      } catch {
+        /* quota / unavailable — drop this write */
+      }
+    }
+    pending.clear();
+    timer = null;
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("beforeunload", flush);
+  }
+  return {
+    getItem: (name: string): string | null => {
+      // Serve an un-flushed pending value so reads never see stale data.
+      const p = pending.get(name);
+      if (p !== undefined) return p;
+      return localStorage.getItem(name);
+    },
+    setItem: (name: string, value: string): void => {
+      pending.set(name, value);
+      if (timer === null) timer = setTimeout(flush, delayMs);
+    },
+    removeItem: (name: string): void => {
+      pending.delete(name);
+      localStorage.removeItem(name);
+    },
+  };
+}
+
 export type ChatStoreState = {
   // Persisted (storage middleware)
   chats: Chat[];
@@ -145,12 +188,18 @@ export const useChatStore = create<ChatStoreState>()(
     }),
     {
       name: STORE_KEY,
-      storage: createJSONStorage(() => localStorage),
+      // Debounced so a long streaming reply doesn't serialize + write the whole
+      // transcript to localStorage on every token (see debouncedLocalStorage).
+      storage: createJSONStorage(() => debouncedLocalStorage(800)),
       partialize: (s) => ({
         chats: s.chats,
         activeChatId: s.activeChatId,
         sidebarCollapsed: s.sidebarCollapsed,
-        settings: s.settings,
+        // Persist settings, but keep the Brave API key OUT of the on-disk
+        // localStorage blob (which also holds chat history and could be
+        // exported/shared). The key lives in the backend kv store instead and
+        // is rehydrated into memory on startup (see App.tsx + SettingsPanel).
+        settings: { ...s.settings, braveApiKey: "" },
       }),
       // One-shot migration from the legacy multi-key layout
       // (lora-hub:chats:v1, lora-hub:active-chat:v1, lora-hub:sidebar-collapsed)

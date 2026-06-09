@@ -20,7 +20,7 @@ use tokio::process::Command;
 
 use crate::audit;
 use crate::permissions::{
-    is_allowed_command, is_allowed_http, is_allowed_write, Preset, PresetState,
+    self, is_allowed_command, is_allowed_http, is_allowed_write, Preset, PresetState,
 };
 use crate::workspace::{resolve_path, Workspace, WorkspaceState};
 
@@ -103,18 +103,39 @@ fn audit_start(
     workspace: Option<&Path>,
     args_summary: &str,
 ) -> Result<(PathBuf, audit::AuditContext), String> {
+    audit_start_inner(app, tool, workspace, args_summary, None)
+}
+
+fn audit_start_with_approval(
+    app: &AppHandle,
+    tool: &'static str,
+    workspace: Option<&Path>,
+    args_summary: &str,
+    approval: &str,
+) -> Result<(PathBuf, audit::AuditContext), String> {
+    audit_start_inner(app, tool, workspace, args_summary, Some(approval))
+}
+
+fn audit_start_inner(
+    app: &AppHandle,
+    tool: &'static str,
+    workspace: Option<&Path>,
+    args_summary: &str,
+    approval: Option<&str>,
+) -> Result<(PathBuf, audit::AuditContext), String> {
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("app_data_dir: {e}"))?;
     let preset_state: State<'_, PresetState> = app.state();
     let preset = *preset_state.0.lock().unwrap();
-    let ctx = audit::start_log(
+    let ctx = audit::start_log_with_approval(
         &data_dir,
         tool,
         preset_name(preset),
         workspace,
         args_summary,
+        approval,
     )?;
     Ok((data_dir, ctx))
 }
@@ -362,12 +383,20 @@ async fn grep_inner(
         std::fs::canonicalize(&ws.root).map_err(|e| format!("workspace: {e}"))?
     };
 
+    // Security: `pattern` is model-controlled. Bind it with `-e` so a pattern
+    // beginning with `-` can never be parsed as a ripgrep flag (e.g. `--pre`,
+    // which runs an arbitrary preprocessor binary, or `-f` which reads patterns
+    // from a file), and terminate options with `--` before the path. `--no-config`
+    // ignores RIPGREP_CONFIG_PATH, which could otherwise smuggle in `--pre` too.
     let out = Command::new("rg")
+        .arg("--no-config")
         .arg("--json")
         .arg("--line-number")
         .arg("--no-heading")
         .arg("--color=never")
+        .arg("-e")
         .arg(pattern)
+        .arg("--")
         .arg(&search_in)
         .output()
         .await
@@ -446,7 +475,7 @@ async fn run_command_inner(
     args: &[String],
     cwd: Option<&str>,
 ) -> Result<CommandResult, String> {
-    is_allowed_command(cmd, preset)?;
+    is_allowed_command(cmd, args, preset)?;
 
     let working_dir = if let Some(c) = cwd {
         resolve_path(&ws.root, c)?
@@ -487,6 +516,96 @@ async fn run_command_inner(
     })
 }
 
+/// Sibling of `tool_run_command` that runs commands the user explicitly
+/// approved via the inline `PermissionPrompt`. Skips `is_allowed_command`
+/// (so it works under Read-only/Standard for non-allowlisted commands) but
+/// still respects `ALWAYS_DENY` — a user can never approve `rm`, `sudo`,
+/// `shutdown`, etc., even from a Trusted preset. The audit entry records
+/// the approval scope so the trail is honest about why this ran.
+#[tauri::command]
+pub async fn tool_run_command_approved(
+    app: AppHandle,
+    ws_state: State<'_, WorkspaceState>,
+    cmd: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    scope: String,
+) -> Result<CommandResult, String> {
+    if scope != "once" && scope != "session" {
+        return Err(format!("invalid approval scope: {scope}"));
+    }
+    let bare = cmd.split('/').last().unwrap_or(&cmd);
+    if permissions::ALWAYS_DENY.contains(&bare) {
+        return Err(format!(
+            "'{cmd}' is in the deny list and cannot be approved"
+        ));
+    }
+
+    let ws = current_workspace(&ws_state)?;
+    let args_summary = json!({
+        "cmd": trunc(&cmd, 100),
+        "args_count": args.len(),
+        "cwd": cwd.as_deref().map(|c| trunc(c, 100)),
+    })
+    .to_string();
+    let (data_dir, ctx) = audit_start_with_approval(
+        &app,
+        "run_command",
+        Some(&ws.root),
+        &args_summary,
+        &scope,
+    )?;
+
+    let working_dir = match cwd.as_deref() {
+        Some(c) => resolve_path(&ws.root, c),
+        None => std::fs::canonicalize(&ws.root).map_err(|e| e.to_string()),
+    };
+    let result = match working_dir {
+        Err(e) => Err(e),
+        Ok(working_dir) => {
+            let fut = Command::new(&cmd)
+                .args(&args)
+                .current_dir(&working_dir)
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap_or_default())
+                .env("HOME", std::env::var("HOME").unwrap_or_default())
+                .output();
+            match tokio::time::timeout(CMD_TIMEOUT, fut).await {
+                Err(_) => Err(format!(
+                    "run_command: timed out after {}s",
+                    CMD_TIMEOUT.as_secs()
+                )),
+                Ok(Err(e)) => Err(format!("run_command: {e}")),
+                Ok(Ok(out)) => {
+                    let mut stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+                    let mut stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+                    let mut truncated = false;
+                    if stdout.len() > MAX_CMD_OUTPUT_BYTES {
+                        stdout.truncate(MAX_CMD_OUTPUT_BYTES);
+                        truncated = true;
+                    }
+                    if stderr.len() > MAX_CMD_OUTPUT_BYTES {
+                        stderr.truncate(MAX_CMD_OUTPUT_BYTES);
+                        truncated = true;
+                    }
+                    Ok(CommandResult {
+                        stdout,
+                        stderr,
+                        exit_code: out.status.code().unwrap_or(-1),
+                        truncated,
+                    })
+                }
+            }
+        }
+    };
+    let (status, bytes) = match &result {
+        Ok(r) => ("success", r.stdout.len() + r.stderr.len()),
+        Err(_) => ("error", 0),
+    };
+    audit::end_log(&data_dir, &ctx, status, bytes);
+    result
+}
+
 #[tauri::command]
 pub async fn tool_http_fetch(
     app: AppHandle,
@@ -518,6 +637,64 @@ pub async fn tool_http_fetch(
     result
 }
 
+/// Send `req`, following any redirects manually so that **every hop** is
+/// re-checked by `is_allowed_url`. reqwest's built-in redirect follower would
+/// defeat the SSRF guard: `is_allowed_url` only validates the *initial* URL, so
+/// an allowed host that 30x-redirects to `127.0.0.1` / `169.254.169.254` (cloud
+/// metadata) would otherwise be fetched. Both HTTP clients are built with
+/// `Policy::none()` and routed through here. Capped at `max_hops`.
+async fn execute_validated(
+    client: &reqwest::Client,
+    mut req: reqwest::Request,
+    max_hops: usize,
+) -> Result<reqwest::Response, String> {
+    for _ in 0..=max_hops {
+        crate::permissions::is_allowed_url(req.url().as_str()).await?;
+        let send_req = req
+            .try_clone()
+            .ok_or_else(|| "request body not replayable across redirect".to_string())?;
+        let resp = client
+            .execute(send_req)
+            .await
+            .map_err(|e| format!("http: {e}"))?;
+        let status = resp.status();
+        if !status.is_redirection() {
+            return Ok(resp);
+        }
+        let Some(loc) = resp.headers().get(reqwest::header::LOCATION) else {
+            // A 3xx with no Location — nothing to follow; hand it back as-is.
+            return Ok(resp);
+        };
+        let loc = loc
+            .to_str()
+            .map_err(|_| "redirect Location not valid text".to_string())?;
+        let next = req
+            .url()
+            .join(loc)
+            .map_err(|e| format!("bad redirect target: {e}"))?;
+        // Don't forward credentials to a different host on redirect.
+        if next.host_str() != req.url().host_str() {
+            let h = req.headers_mut();
+            h.remove(reqwest::header::AUTHORIZATION);
+            h.remove(reqwest::header::COOKIE);
+            h.remove(reqwest::header::PROXY_AUTHORIZATION);
+        }
+        // Per RFC 7231: 303 (and conventionally 301/302) demote to GET and drop
+        // the body; 307/308 preserve method + body.
+        if matches!(
+            status,
+            reqwest::StatusCode::SEE_OTHER
+                | reqwest::StatusCode::MOVED_PERMANENTLY
+                | reqwest::StatusCode::FOUND
+        ) {
+            *req.method_mut() = reqwest::Method::GET;
+            *req.body_mut() = None;
+        }
+        *req.url_mut() = next;
+    }
+    Err("too many redirects".to_string())
+}
+
 async fn http_fetch_inner(
     preset: Preset,
     url: &str,
@@ -526,26 +703,27 @@ async fn http_fetch_inner(
     body: Option<String>,
 ) -> Result<HttpResponse, String> {
     is_allowed_http(method, preset)?;
-    crate::permissions::is_allowed_url(url).await?;
 
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| e.to_string())?;
 
     let method_parsed = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|e| format!("bad method: {e}"))?;
-    let mut req = client.request(method_parsed, url);
+    let mut builder = client.request(method_parsed, url);
     if let Some(hs) = headers {
         for (k, v) in hs {
-            req = req.header(&k, &v);
+            builder = builder.header(&k, &v);
         }
     }
     if let Some(b) = body {
-        req = req.body(b);
+        builder = builder.body(b);
     }
+    let req = builder.build().map_err(|e| format!("bad request: {e}"))?;
 
-    let resp = req.send().await.map_err(|e| format!("http: {e}"))?;
+    let resp = execute_validated(&client, req, 5).await?;
     let status = resp.status().as_u16();
     let headers_out: HashMap<String, String> = resp
         .headers()
@@ -881,7 +1059,6 @@ pub async fn tool_fetch_page(
 
 async fn fetch_page_inner(preset: Preset, url: &str) -> Result<FetchPageResult, String> {
     is_allowed_http("GET", preset)?;
-    crate::permissions::is_allowed_url(url).await?;
 
     // Sites behind Cloudflare / aggressive WAFs (AccuWeather, StackOverflow
     // edges, any newspaper paywall) reject a blank / bot-shaped UA outright
@@ -890,17 +1067,22 @@ async fn fetch_page_inner(preset: Preset, url: &str) -> Result<FetchPageResult, 
     // shell fetching a page for the user).
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
              (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
         )
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
+    // Redirects are followed manually (re-validating each hop) — see
+    // `execute_validated`. News/paywall pages legitimately 30x a lot.
+    let req = client
         .get(url)
         .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
         .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
+        .build()
+        .map_err(|e| format!("fetch_page: bad request: {e}"))?;
+    let resp = execute_validated(&client, req, 5)
         .await
         .map_err(|e| format!("fetch_page: {e}"))?;
     if !resp.status().is_success() {
@@ -940,4 +1122,49 @@ async fn fetch_page_inner(preset: Preset, url: &str) -> Result<FetchPageResult, 
         markdown: md_out,
         truncated,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rg_available() -> bool {
+        std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// A model-controlled grep pattern that begins with `-` must be treated as
+    /// a literal search string, never parsed as a ripgrep flag. Before the fix
+    /// (`.arg(pattern)` with no `-e`/`--`), a pattern like `--pre=/bin/sh` would
+    /// be consumed as the `--pre` flag and run an arbitrary preprocessor binary.
+    /// Here we assert the dangerous-looking pattern matches a file that contains
+    /// it *as literal text* — proving it's a search term, not a flag.
+    #[tokio::test]
+    async fn grep_treats_flag_like_pattern_as_literal() {
+        if !rg_available() {
+            eprintln!("ripgrep not installed; skipping grep injection test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(root.join("a.txt"), "hello sentinel world\n").unwrap();
+        std::fs::write(root.join("b.txt"), "config: --pre=/bin/sh here\n").unwrap();
+        let ws = Workspace { root: root.clone() };
+
+        // Sanity: ordinary patterns still match.
+        let normal = grep_inner(&ws, "sentinel", None).await.expect("grep ok");
+        assert_eq!(normal.len(), 1, "expected one match for 'sentinel'");
+
+        // The injection payload is handled as a literal pattern: it matches the
+        // file that literally contains that text, and (crucially) does not error
+        // out as an unknown flag or invoke a preprocessor.
+        let payload = grep_inner(&ws, "--pre=/bin/sh", None)
+            .await
+            .expect("flag-like pattern must be treated as a literal, not a flag");
+        assert_eq!(payload.len(), 1, "expected literal match for the payload text");
+        assert!(payload[0].text.contains("--pre=/bin/sh"));
+    }
 }

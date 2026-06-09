@@ -1,6 +1,7 @@
 mod attachments;
 mod audit;
 mod cache;
+
 mod db;
 mod mcp;
 mod memory;
@@ -121,6 +122,60 @@ fn get_preset(state: tauri::State<'_, PresetState>) -> Preset {
 }
 
 #[tauri::command]
+fn audit_log_read(
+    app: AppHandle,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<Vec<audit::AuditRow>, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    audit::read_log(&data_dir, limit.unwrap_or(500), offset.unwrap_or(0))
+}
+
+#[tauri::command]
+fn audit_log_clear(app: AppHandle) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    audit::clear_log(&data_dir)
+}
+
+#[tauri::command]
+fn audit_log_path(app: AppHandle) -> Result<String, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(audit::log_path(&data_dir).to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn audit_log_export(app: AppHandle, dest: String) -> Result<u64, String> {
+    // `dest` normally comes from a Save dialog, but this command is reachable
+    // over IPC with any path. Constrain it to an absolute path with a
+    // log/text-ish extension so a caller can't truncate/clobber an arbitrary
+    // file (e.g. ~/.zshrc, a dotfile, or a binary).
+    let dest_path = std::path::Path::new(&dest);
+    let ext_ok = dest_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "log" | "json" | "jsonl" | "ndjson" | "txt"
+            )
+        })
+        .unwrap_or(false);
+    if !dest_path.is_absolute() || !ext_ok {
+        return Err(format!(
+            "export path must be an absolute *.log/.json/.jsonl/.txt path: {dest}"
+        ));
+    }
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let src = audit::log_path(&data_dir);
+    if !src.exists() {
+        // Empty log → write an empty file so the user gets a valid (empty) export.
+        std::fs::write(&dest, "").map_err(|e| format!("write {dest}: {e}"))?;
+        return Ok(0);
+    }
+    std::fs::copy(&src, &dest).map_err(|e| format!("copy to {dest}: {e}"))
+}
+
+#[tauri::command]
 fn system_memory_bytes() -> Result<u64, String> {
     #[cfg(target_os = "macos")]
     {
@@ -212,6 +267,10 @@ async fn download_adapter(
         if !dest.starts_with(&dir) {
             return Err(format!("path escape detected for {}", file.name));
         }
+        // SSRF guard: file URLs come from storefront rows, not a fixed catalog,
+        // so make sure none resolve to loopback/private/metadata addresses
+        // before we fetch them.
+        crate::permissions::is_allowed_url(&file.url).await?;
         tracing::info!(slug, file = %file.name, "downloading {}", file.url);
         let resp = client
             .get(&file.url)
@@ -433,15 +492,35 @@ fn chat_upsert(db: State<'_, Database>, chat: ChatFull) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    tx.execute("DELETE FROM messages WHERE chat_id = ?1", [&chat.id])
-        .map_err(|e| e.to_string())?;
+    // Upsert messages individually so appending one message to an N-message
+    // chat costs O(1) writes, not an O(N) delete-all + reinsert-all (which made
+    // saving a long conversation O(N^2) over its lifetime). Diff against the ids
+    // already stored for this chat and delete only the ones the client dropped.
+    let mut existing_ids: std::collections::HashSet<String> = {
+        let mut stmt = tx
+            .prepare("SELECT id FROM messages WHERE chat_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([&chat.id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut set = std::collections::HashSet::new();
+        for r in rows {
+            set.insert(r.map_err(|e| e.to_string())?);
+        }
+        set
+    };
 
     {
         let mut stmt = tx
             .prepare(
                 "INSERT INTO messages \
                  (id, chat_id, position, role, payload_json, provenance_json, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                   position = excluded.position, \
+                   role = excluded.role, \
+                   payload_json = excluded.payload_json, \
+                   provenance_json = excluded.provenance_json",
             )
             .map_err(|e| e.to_string())?;
         for (idx, m) in chat.messages.iter().enumerate() {
@@ -462,6 +541,18 @@ fn chat_upsert(db: State<'_, Database>, chat: ChatFull) -> Result<(), String> {
                 now,
             ])
             .map_err(|e| e.to_string())?;
+            existing_ids.remove(&m.id);
+        }
+    }
+
+    // Whatever ids remain were present in the DB but not in this save → the
+    // client removed them.
+    if !existing_ids.is_empty() {
+        let mut del = tx
+            .prepare("DELETE FROM messages WHERE id = ?1")
+            .map_err(|e| e.to_string())?;
+        for stale in &existing_ids {
+            del.execute([stale]).map_err(|e| e.to_string())?;
         }
     }
 
@@ -511,6 +602,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -526,6 +619,7 @@ pub fn run() {
             handle.manage(WorkspaceState::new(ws));
             handle.manage(PresetState::new(preset));
             handle.manage(Arc::new(mcp::FliMcpState::new()));
+            handle.manage(Arc::new(mcp::StripeMcpState::new()));
 
             // Open (or create) the SQLite store next to audit.log. Failure
             // here is logged but non-fatal so the rest of the app can still
@@ -566,6 +660,11 @@ pub fn run() {
             tools::tool_glob,
             tools::tool_grep,
             tools::tool_run_command,
+            tools::tool_run_command_approved,
+            audit_log_read,
+            audit_log_clear,
+            audit_log_path,
+            audit_log_export,
             tools::tool_http_fetch,
             tools::tool_edit_file,
             tools::tool_fetch_page,
@@ -578,6 +677,7 @@ pub fn run() {
             cache::list_cached_hf_models,
             cache::delete_cached_hf_model,
             mcp::mcp_fli_call,
+            mcp::mcp_stripe_call,
             chat_list,
             chat_load,
             chat_upsert,

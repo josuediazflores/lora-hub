@@ -107,3 +107,14 @@ INSERT INTO adapter_versions (slug, version, weights_key, weights_sha256, weight
    'gemma-4-e4b-it-4bit/oasst1-instruct/1.0.0/adapter_config.json',
    NULL,
    'Rank 8, 42 layers. Unsloth regex correctly scoped to language path; 0 contamination.');
+
+-- Sample updater manifest. Replace with real artifacts produced by
+-- scripts/release.sh on each tagged release. The signature is the contents of
+-- the .sig file emitted alongside the .app.tar.gz when `tauri build` runs with
+-- TAURI_SIGNING_PRIVATE_KEY set.
+INSERT INTO updates (channel, target_arch, version, pub_date, notes, url, signature) VALUES
+  ('stable', 'darwin-aarch64', '0.1.0',
+   '2026-04-27T00:00:00Z',
+   'Initial pre-alpha. Bundled MLX sidecar, first-run onboarding.',
+   'https://updates.lorahub.app/dl/stable/0.1.0/LoRA-Hub_0.1.0_aarch64.app.tar.gz',
+   'SAMPLE_SIGNATURE_REPLACE_ME');

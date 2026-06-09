@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { ArrowLeft, ChevronRight, Trash2 } from "lucide-react";
 import {
   type Memory,
@@ -6,6 +7,7 @@ import {
   MEMORY_LIMITS,
   totalBytes,
 } from "../lib/memory";
+import { AuditLogSection } from "./AuditLogSection";
 
 export type Theme = "dark" | "light" | "system";
 export type MemoryWritePolicy = "off" | "ask" | "auto";
@@ -40,6 +42,11 @@ export type Settings = {
    * (not just Computer Use). Neither touches the filesystem or shell, so
    * they're safe to allow by default. */
   webToolsInNormalChat: boolean;
+  /** When true, Stripe payment tools (create_payment_link, create_invoice,
+   * list_transactions, refund_payment) are exposed in normal chat. Off by
+   * default — these mutate real Stripe state. Requires STRIPE_SECRET_KEY in
+   * the shell that launches lora-hub; use a sk_test_… key in dev. */
+  stripeToolsInNormalChat: boolean;
   /** Which backend powers the web_search tool. DuckDuckGo is zero-setup
    * (uses DuckDuckGo's lite HTML endpoint). Brave requires an API key but
    * is more reliable. */
@@ -61,6 +68,7 @@ export const DEFAULT_SETTINGS: Settings = {
   useMemoryInContext: true,
   memoryInNormalChat: true,
   webToolsInNormalChat: true,
+  stripeToolsInNormalChat: false,
   searchProvider: "duckduckgo",
   braveApiKey: "",
 };
@@ -82,14 +90,6 @@ export function loadSettings(): Settings {
     return { ...DEFAULT_SETTINGS, ...parsed };
   } catch {
     return DEFAULT_SETTINGS;
-  }
-}
-
-export function saveSettings(s: Settings): void {
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
-  } catch {
-    // ignore
   }
 }
 
@@ -262,10 +262,18 @@ export function SettingsPage({ settings, onChange, onBack, memories, onSaveMemor
             {settings.searchProvider === "brave" && (
               <SecretRow
                 label="brave search api key"
-                help="Sign up at brave.com/search/api. Stored only on this device, sent only to Brave."
+                help="Sign up at brave.com/search/api. Stored in the OS-local app keystore on this device, sent only to Brave."
                 placeholder="BSA… (leave blank to disable web_search)"
                 value={settings.braveApiKey}
-                onChange={(v) => onChange({ ...settings, braveApiKey: v })}
+                onChange={(v) => {
+                  onChange({ ...settings, braveApiKey: v });
+                  // Persist the secret to the backend kv store, not the
+                  // localStorage settings blob.
+                  void invoke("kv_set", {
+                    key: "brave_search_api_key",
+                    value: v,
+                  });
+                }}
               />
             )}
             <ToggleRow
@@ -274,6 +282,20 @@ export function SettingsPage({ settings, onChange, onBack, memories, onSaveMemor
               value={settings.webToolsInNormalChat}
               onChange={(v) => onChange({ ...settings, webToolsInNormalChat: v })}
             />
+            <ToggleRow
+              label="stripe tools in normal chat"
+              help="Expose Stripe + bill-split tools (payment links, invoices, subscriptions with test-clock fast-forward, refunds, receipt OCR, splitting). Off by default — these mutate real Stripe state. Set STRIPE_SECRET_KEY in your shell before launching lora-hub. Strongly recommended: use a sk_test_… key."
+              value={settings.stripeToolsInNormalChat}
+              onChange={(v) => onChange({ ...settings, stripeToolsInNormalChat: v })}
+            />
+          </Section>
+
+          <Section
+            number="07"
+            title="audit log"
+            dek="every tool call recorded on this device"
+          >
+            <AuditLogSection />
           </Section>
 
           <div className="mt-10 flex items-center justify-between border-t border-app-border pt-6">

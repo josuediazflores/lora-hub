@@ -1,7 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Download, LayoutGrid, List, Search, Star, X } from "lucide-react";
 import { fetchAdapters } from "../lib/store";
 import type { StoreAdapter } from "../lib/store";
+
+const PAGE_SIZE = 50;
+
+/** Debounce a value so downstream effects only re-run after the user stops
+ * typing for `delay` ms. Local to this file — no other call sites today. */
+function useDebouncedValue<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
 import {
   compactNum,
   deltaOf,
@@ -40,8 +53,11 @@ export function StoreBrowse({
   const [adapters, setAdapters] = useState<StoreAdapter[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const [q, setQ] = useState("");
+  const debouncedQ = useDebouncedValue(q, 300);
   const [useCases, setUseCases] = useState<Set<UseCase>>(
     new Set(preset?.useCase ? [preset.useCase] : []),
   );
@@ -54,28 +70,85 @@ export function StoreBrowse({
   const [sort, setSort] = useState<SortKey>("downloads");
   const [view, setView] = useState<ViewMode>("cards");
 
+  // Server vs client filter split:
+  //   server-delegated → q, tags, bases (compatibleOnly), sort (downloads/rating/recent), pagination
+  //   client-only      → useCases, licenses, installedOnly, minRating, maxSizeMB, "trending"+"size" sorts
+  // Trending and size sorts have no server equivalent; we fall back to
+  // server "downloads" then re-sort the page client-side. Same goes for
+  // useCase (a heuristic over tags, not a stored column).
+  const serverSort = useMemo<"downloads" | "rating" | "recent">(() => {
+    if (sort === "rating") return "rating";
+    if (sort === "newest") return "recent";
+    return "downloads"; // downloads, trending, size all start from this server order
+  }, [sort]);
+
+  // The query identity used to detect "the filter set changed" → reset page.
+  const queryKey = useMemo(() => {
+    const tagList = Array.from(tags).sort().join(",");
+    return [
+      debouncedQ.trim(),
+      tagList,
+      compatibleOnly && baseSha ? baseSha : "",
+      serverSort,
+    ].join("|");
+  }, [debouncedQ, tags, compatibleOnly, baseSha, serverSort]);
+
+  // Track which queryKey is "in flight" so a stale fetch doesn't overwrite
+  // the latest filter results.
+  const fetchSeqRef = useRef(0);
+
   useEffect(() => {
-    let cancelled = false;
+    const seq = ++fetchSeqRef.current;
     setLoading(true);
     setError(null);
+    setAdapters([]);
+    setHasMore(false);
     const bases = compatibleOnly && baseSha ? [baseSha] : undefined;
-    fetchAdapters({ bases, sort: "downloads", limit: 200 })
+    fetchAdapters({
+      bases,
+      tags: tags.size ? Array.from(tags) : undefined,
+      q: debouncedQ.trim() || undefined,
+      sort: serverSort,
+      limit: PAGE_SIZE,
+      offset: 0,
+    })
       .then((r) => {
-        if (!cancelled) {
-          setAdapters(r);
-          setLoading(false);
-        }
+        if (seq !== fetchSeqRef.current) return;
+        setAdapters(r);
+        setHasMore(r.length === PAGE_SIZE);
+        setLoading(false);
       })
       .catch((e) => {
-        if (!cancelled) {
-          setError(String(e));
-          setLoading(false);
-        }
+        if (seq !== fetchSeqRef.current) return;
+        setError(String(e));
+        setLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [compatibleOnly, baseSha]);
+  }, [queryKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function loadMore() {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    const seq = fetchSeqRef.current;
+    const bases = compatibleOnly && baseSha ? [baseSha] : undefined;
+    try {
+      const next = await fetchAdapters({
+        bases,
+        tags: tags.size ? Array.from(tags) : undefined,
+        q: debouncedQ.trim() || undefined,
+        sort: serverSort,
+        limit: PAGE_SIZE,
+        offset: adapters.length,
+      });
+      if (seq !== fetchSeqRef.current) return;
+      setAdapters((prev) => [...prev, ...next]);
+      setHasMore(next.length === PAGE_SIZE);
+    } catch (e) {
+      if (seq !== fetchSeqRef.current) return;
+      setError(String(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }
 
   // Shadow "compatible" — the API already filters by base when compatibleOnly is on.
   // For the facet "only compatible" toggle to work independently (all adapters vs
@@ -119,59 +192,30 @@ export function StoreBrowse({
     return Array.from(out.entries()).sort((a, b) => b[1] - a[1]).slice(0, 12);
   }, [enriched]);
 
+  // Server has already done q / tags / bases / (downloads|rating|recent) sort
+  // and returned the slice. Client-only filters layer on top and the two
+  // sort modes the server doesn't know about ("trending", "size") re-sort
+  // the page locally.
   const filtered = useMemo(() => {
     let out = enriched;
-    if (q.trim()) {
-      const needle = q.toLowerCase();
-      out = out.filter(
-        (e) =>
-          e.adapter.name.toLowerCase().includes(needle) ||
-          e.adapter.description.toLowerCase().includes(needle) ||
-          e.adapter.author.toLowerCase().includes(needle) ||
-          e.adapter.tags.some((t) => t.toLowerCase().includes(needle)),
-      );
-    }
     if (useCases.size) out = out.filter((e) => useCases.has(e.useCase));
     if (licenses.size) out = out.filter((e) => licenses.has(e.adapter.license));
-    if (tags.size)
-      out = out.filter((e) => e.adapter.tags.some((t) => tags.has(t)));
-    if (compatibleOnly) out = out.filter((e) => e.compatible);
     if (installedOnly) out = out.filter((e) => e.installed);
     if (minRating > 0)
       out = out.filter((e) => (e.adapter.rating_avg ?? 0) >= minRating);
     if (maxSizeMB < 300) out = out.filter((e) => e.sizeMB <= maxSizeMB);
 
-    switch (sort) {
-      case "trending":
-        out = [...out].sort((a, b) => b.delta - a.delta);
-        break;
-      case "rating":
-        out = [...out].sort(
-          (a, b) => (b.adapter.rating_avg ?? 0) - (a.adapter.rating_avg ?? 0),
-        );
-        break;
-      case "newest":
-        out = [...out].sort((a, b) => {
-          const ax = a.adapter.published_at ?? 0;
-          const bx = b.adapter.published_at ?? 0;
-          return bx - ax;
-        });
-        break;
-      case "size":
-        out = [...out].sort((a, b) => a.sizeMB - b.sizeMB);
-        break;
-      case "downloads":
-      default:
-        out = [...out].sort((a, b) => b.adapter.downloads - a.adapter.downloads);
+    if (sort === "trending") {
+      out = [...out].sort((a, b) => b.delta - a.delta);
+    } else if (sort === "size") {
+      out = [...out].sort((a, b) => a.sizeMB - b.sizeMB);
     }
+    // downloads / rating / newest sort came from the server in that order.
     return out;
   }, [
     enriched,
-    q,
     useCases,
     licenses,
-    tags,
-    compatibleOnly,
     installedOnly,
     minRating,
     maxSizeMB,
@@ -461,10 +505,25 @@ export function StoreBrowse({
                 <br />
                 try loosening the filters.
               </div>
-            ) : view === "cards" ? (
-              <CardsGrid items={filtered} onOpen={onOpenAdapter} onInstall={onInstallAdapter} />
             ) : (
-              <TableView items={filtered} onOpen={onOpenAdapter} />
+              <>
+                {view === "cards" ? (
+                  <CardsGrid items={filtered} onOpen={onOpenAdapter} onInstall={onInstallAdapter} />
+                ) : (
+                  <TableView items={filtered} onOpen={onOpenAdapter} />
+                )}
+                {hasMore && (
+                  <div className="mt-6 flex justify-center">
+                    <button
+                      onClick={loadMore}
+                      disabled={loadingMore}
+                      className="rounded-md border border-app-border px-4 py-1.5 font-mono text-[11px] text-app-text-muted hover:border-app-border-strong hover:text-app-text disabled:opacity-50"
+                    >
+                      {loadingMore ? "loading…" : "load more"}
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>

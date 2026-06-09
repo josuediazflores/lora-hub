@@ -30,6 +30,9 @@ use std::path::PathBuf;
 
 use base64::Engine;
 use serde::Serialize;
+use tauri::{AppHandle, Manager};
+
+use crate::audit;
 
 const TEXT_CAP_BYTES: usize = 2 * 1024 * 1024;
 const PDF_CAP_BYTES: usize = 5 * 1024 * 1024;
@@ -60,7 +63,23 @@ pub struct AttachmentPayload {
 }
 
 #[tauri::command]
-pub fn read_attachment(path: String) -> Result<AttachmentPayload, String> {
+pub fn read_attachment(app: AppHandle, path: String) -> Result<AttachmentPayload, String> {
+    // This reads an arbitrary absolute path (the file the user drag-dropped)
+    // into model context, so record it in the audit log. We log only the path
+    // length and resulting kind/size — never the contents.
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let summary = serde_json::json!({ "path_len": path.len() }).to_string();
+    let ctx = audit::start_log(&data_dir, "read_attachment", "n/a", None, &summary)?;
+    let result = read_attachment_inner(path);
+    let (status, bytes) = match &result {
+        Ok(p) => ("success", p.size as usize),
+        Err(_) => ("error", 0),
+    };
+    audit::end_log(&data_dir, &ctx, status, bytes);
+    result
+}
+
+fn read_attachment_inner(path: String) -> Result<AttachmentPayload, String> {
     let p = PathBuf::from(&path);
     let name = p
         .file_name()
@@ -921,7 +940,7 @@ mod tests {
         let mut pathbuf = tmp.path().to_path_buf();
         pathbuf.set_extension("zip");
         std::fs::rename(tmp.path(), &pathbuf).expect("rename to .zip");
-        let payload = read_attachment(pathbuf.to_string_lossy().into_owned())
+        let payload = read_attachment_inner(pathbuf.to_string_lossy().into_owned())
             .expect("read_attachment");
         let _ = std::fs::remove_file(&pathbuf);
         assert_eq!(payload.kind, "unsupported");
